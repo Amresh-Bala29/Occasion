@@ -1,0 +1,20 @@
+name: web-ci
+on:
+  push:
+    paths: ["apps/web/**", ".github/workflows/web-ci.yml"]
+  pull_request:
+    paths: ["apps/web/**", ".github/workflows/web-ci.yml"]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build

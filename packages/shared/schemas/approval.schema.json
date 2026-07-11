@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://occasion.dev/schemas/approval.schema.json",
+  "title": "Approval",
+  "type": "object",
+  "required": ["id", "action", "status"],
+  "properties": {
+    "id": { "type": "string" },
+    "eventId": { "type": "string" },
+    "action": { "type": "string" },
+    "amount": { "type": "number" },
+    "status": { "type": "string", "enum": ["pending", "approved", "rejected"] }
+  }
+}

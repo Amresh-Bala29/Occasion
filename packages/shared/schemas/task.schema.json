@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://occasion.dev/schemas/task.schema.json",
+  "title": "Task",
+  "type": "object",
+  "required": ["id", "eventId", "title"],
+  "properties": {
+    "id": { "type": "string" },
+    "eventId": { "type": "string" },
+    "title": { "type": "string" },
+    "status": { "type": "string", "enum": ["pending", "in_progress", "blocked", "done"] },
+    "assigneeAgent": { "type": "string" }
+  }
+}
