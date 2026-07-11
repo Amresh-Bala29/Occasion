@@ -1,2 +1,2 @@
-# HCompany_Hackathon
+# Occasion
 Amresh Balakrishnan - 7/11 sf hackathon
