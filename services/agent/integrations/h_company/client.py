@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from core.config import settings
 from integrations.h_company.schemas import SessionResult
+from integrations.h_company.session import browser_overrides
 
 _COMPLETED = "completed"
 _SUCCESS = "success"
@@ -43,7 +44,9 @@ class HClient:
         reach the except branch.
         """
         try:
-            result = self._sdk.run_session(agent=agent, messages=task)
+            result = self._sdk.run_session(
+                agent=agent, messages=task, overrides=browser_overrides()
+            )
         except Exception as exc:  # auth, rate limit, network — surface it, don't crash
             return _result_from_error(exc)
         return _result_from_session(result, self._agent_view_url(getattr(result, "id", None)))

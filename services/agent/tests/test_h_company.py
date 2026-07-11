@@ -187,14 +187,23 @@ def test_run_browser_task_requires_api_key(monkeypatch) -> None:
     assert guard.calls == []
 
 
-def test_run_browser_task_forwards_task_and_agent(monkeypatch) -> None:
+def test_run_browser_task_forwards_task_agent_and_browser(monkeypatch) -> None:
     monkeypatch.setattr(settings, "hai_api_key", "hk-test")
     sdk = FakeSDK(fake_result(id="s9", status="idle", outcome="success", answer="done"))
     result = run_browser_task(ComputerUseRequest(task=VENUE_RESEARCH_TASK), client=HClient(sdk))
 
     assert result.succeeded is True
-    # Called exactly as specified: agent + messages, nothing else.
-    assert sdk.calls == [{"agent": "h/web-surfer-flash", "messages": VENUE_RESEARCH_TASK}]
+    # Forwards the task/agent, plus the browser overrides that point H at a real cloud Chrome
+    # opened at Google with a reused, signed-in profile.
+    assert len(sdk.calls) == 1
+    call = sdk.calls[0]
+    assert call["agent"] == "h/web-surfer-flash"
+    assert call["messages"] == VENUE_RESEARCH_TASK
+    overrides = call["overrides"]
+    assert overrides["agent.environments[kind=web].host"] == "cloud"
+    assert overrides["agent.environments[kind=web].start_url"] == "https://www.google.com"
+    assert overrides["agent.environments[kind=web].use_default_browser_profile"] is True
+    assert overrides["agent.environments[kind=web].persist_browser_profile"] is True
 
 
 def test_run_endpoint_returns_outcome(monkeypatch) -> None:

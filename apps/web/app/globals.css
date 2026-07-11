@@ -1,0 +1,118 @@
+/* Occasion web — Tailwind v4 theme. Components style themselves with utilities;
+   only tokens and a few cross-component primitives live here. */
+
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-hanken), -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-serif: var(--font-newsreader), "Iowan Old Style", "New York", Georgia, "Times New Roman",
+    serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* Neutrals */
+  --color-canvas: #eef1f7;
+  --color-surface: #ffffff;
+  --color-line: #e4e8f0;
+  --color-line-strong: #d5dbe8;
+  --color-ink: #1c2438;
+  --color-ink-soft: #5c6579;
+  --color-ink-faint: #8a92a6;
+  --color-ink-mist: #b8bfce;
+
+  /* Brand blue */
+  --color-brand: #3b5bdb;
+  --color-brand-deep: #3450c4;
+  --color-brand-mist: #dfe7fb;
+  --color-brand-soft: #edf1fd;
+
+  /* Status greens / ambers / reds */
+  --color-positive: #37b24d;
+  --color-positive-deep: #2b8a3e;
+  --color-positive-soft: #e9f7ec;
+  --color-warn: #f59f00;
+  --color-warn-strong: #e67700;
+  --color-warn-deep: #b26a00;
+  --color-warn-soft: #fdf3dd;
+  --color-danger: #c92a2a;
+  --color-danger-soft: #fdecec;
+
+  --shadow-card: 0 1px 2px rgba(23, 32, 58, 0.04), 0 4px 14px rgba(23, 32, 58, 0.05);
+  --shadow-modal: 0 8px 20px rgba(23, 32, 58, 0.14), 0 24px 60px rgba(23, 32, 58, 0.22);
+}
+
+@layer base {
+  body {
+    @apply bg-canvas font-sans text-[14px] leading-[1.45] text-ink antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+}
+
+/* Primitives reused across many components; everything else is inline utilities. */
+@layer components {
+  .card {
+    @apply rounded-[14px] border border-line bg-surface shadow-card;
+  }
+
+  /* Small-caps monospace label used for eyebrows and meta headings. */
+  .eyebrow {
+    @apply font-mono text-[10.5px] font-semibold tracking-[0.14em] text-ink-soft uppercase;
+  }
+
+  .chip {
+    @apply inline-block rounded-full px-2.5 py-1 font-mono text-[10.5px] font-semibold tracking-[0.08em] whitespace-nowrap uppercase;
+  }
+
+  .chip-amber {
+    @apply bg-warn-soft text-warn-deep;
+  }
+
+  .chip-green {
+    @apply bg-positive-soft text-positive-deep;
+  }
+
+  .chip-red {
+    @apply bg-danger-soft text-danger;
+  }
+
+  .chip-gray {
+    @apply bg-[#eef1f6] text-ink-soft;
+  }
+
+  .btn {
+    @apply cursor-pointer rounded-[9px] border border-transparent px-4 py-2 text-[13px] font-semibold;
+  }
+
+  .btn-primary {
+    @apply bg-brand text-white hover:bg-brand-deep disabled:cursor-default disabled:bg-brand-mist;
+  }
+
+  .btn-secondary {
+    @apply border-line-strong bg-surface text-ink hover:bg-[#f6f8fc];
+  }
+
+  .dot {
+    @apply inline-block size-2 shrink-0 rounded-full;
+  }
+
+  .dot-green {
+    @apply bg-positive;
+  }
+
+  .dot-blue {
+    @apply bg-brand;
+  }
+
+  .dot-amber {
+    @apply bg-warn;
+  }
+
+  .dot-gray {
+    @apply bg-ink-mist;
+  }
+}
