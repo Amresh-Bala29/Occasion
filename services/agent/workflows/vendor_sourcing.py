@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from typing import TYPE_CHECKING
 
 import httpx
 from pydantic import BaseModel, Field
@@ -27,16 +28,22 @@ from agents.requirements_agent import EventRequirements
 from core.orchestrator import Orchestrator, TaskRun
 from integrations.h_company.client import HClient
 from integrations.h_company.schemas import SessionResult
+from memory.event_memory import SHORTLIST
+from memory.vector_store import event_scope
 from models.task import Task
 from workflows.event_planning import (
     EventPlan,
     VendorCategory,
     complete,
+    memory_sections,
     research_guards,
     slug,
     sourcing_tasks,
     structured,
 )
+
+if TYPE_CHECKING:
+    from core.state import Memory
 
 # Retail-style carts check out through purchasing — the only agent whose remit covers
 # completing a purchase. Relationship bookings stay with the category specialist,
@@ -146,8 +153,15 @@ class VendorSourcingWorkflow:
     agent failure — the report carries every run either way.
     """
 
-    def __init__(self, client: HClient | None = None, http_client: httpx.Client | None = None) -> None:
-        self._orchestrator = Orchestrator(client=client, http_client=http_client)
+    def __init__(
+        self,
+        client: HClient | None = None,
+        http_client: httpx.Client | None = None,
+        *,
+        memory: Memory | None = None,
+    ) -> None:
+        self._orchestrator = Orchestrator(client=client, http_client=http_client, memory=memory)
+        self._memory = memory
         self._http = http_client
 
     async def run(
@@ -157,6 +171,7 @@ class VendorSourcingWorkflow:
         event_id: str,
         requirements: EventRequirements | None = None,
         discover: bool = False,
+        user_id: str | None = None,
     ) -> SourcingReport:
         """Research every vendor category in the plan and shortlist the findings.
 
@@ -165,22 +180,34 @@ class VendorSourcingWorkflow:
         20 minutes, so it is opt-in.
         """
         report = SourcingReport(event_id=event_id)
+        # A shortlist snapshot from a prior run lets a re-run skip the research fan-out entirely.
+        recalled = self._recalled_shortlist(event_id)
+        if recalled is not None:
+            report.shortlist = recalled
+            report.succeeded = True
+            return report
+
         discovery_notes: str | None = None
         if discover:
             report.discovery_run = await self._discover(plan, event_id)
             if report.discovery_run.result.succeeded:
                 discovery_notes = report.discovery_run.result.answer
 
-        report.briefs_run = await self._compile_briefs(plan, requirements, discovery_notes)
+        report.briefs_run = await self._compile_briefs(
+            plan, requirements, discovery_notes, event_id=event_id, user_id=user_id
+        )
         compiled = structured(report.briefs_run, SourcingBriefs)
         report.briefs = compiled.briefs if compiled else []
 
         report.research_tasks = self._research_tasks(plan, report.briefs, event_id)
         report.research_runs = await self._orchestrator.run_tasks(report.research_tasks)
+        self._remember_research(report.research_tasks, report.research_runs, event_id)
 
         report.shortlist_run = await self._synthesize(plan, report.research_tasks, report.research_runs)
         report.shortlist = structured(report.shortlist_run, VendorShortlist)
         report.succeeded = report.shortlist is not None
+        if self._memory is not None and report.shortlist is not None:
+            self._memory.event(event_id).set(SHORTLIST, report.shortlist.model_dump(mode="json"))
         return report
 
     async def book(
@@ -217,7 +244,10 @@ class VendorSourcingWorkflow:
             title="\n".join(lines),
             assignee_agent=assignee,
         )
-        return await self._orchestrator.run_task(task)
+        run = await self._orchestrator.run_task(task)
+        if self._memory is not None and run.result.succeeded:
+            self._memory.vendors.record_booked(candidate, event_id=event_id)
+        return run
 
     async def _discover(self, plan: EventPlan, event_id: str) -> TaskRun:
         categories = ", ".join(category.category for category in plan.vendor_categories)
@@ -238,6 +268,9 @@ class VendorSourcingWorkflow:
         plan: EventPlan,
         requirements: EventRequirements | None,
         discovery_notes: str | None,
+        *,
+        event_id: str | None = None,
+        user_id: str | None = None,
     ) -> SessionResult:
         sections = [f"Event: {plan.event_summary}", f"Today's date: {date.today().isoformat()}"]
         if requirements is not None:
@@ -249,6 +282,7 @@ class VendorSourcingWorkflow:
             sections.append(block)
         if discovery_notes:
             sections.append(f"Discovery notes (URLs from a prior research sweep):\n{discovery_notes}")
+        sections.extend(memory_sections(self._memory, plan.event_summary, event_id=event_id, user_id=user_id))
         return await complete("\n\n".join(sections), BRIEF_INSTRUCTIONS, SourcingBriefs, http_client=self._http)
 
     def _research_tasks(self, plan: EventPlan, briefs: list[ResearchBrief], event_id: str) -> list[Task]:
@@ -271,6 +305,9 @@ class VendorSourcingWorkflow:
         ]
         if caps:
             blocks.append("Budget caps:\n" + "\n".join(caps))
+        reputation = self._reputation_note(plan)
+        if reputation:
+            blocks.append(reputation)
         for task, run in zip(tasks, runs):
             category = task.assignee_agent
             if run.result.succeeded and run.result.data is not None:
@@ -280,6 +317,39 @@ class VendorSourcingWorkflow:
                 reason = run.result.error or run.result.status
                 blocks.append(f"{category} research: RESEARCH FAILED: {reason}")
         return await complete("\n\n".join(blocks), SHORTLIST_INSTRUCTIONS, VendorShortlist, http_client=self._http)
+
+    def _recalled_shortlist(self, event_id: str) -> VendorShortlist | None:
+        if self._memory is None:
+            return None
+        snapshot = self._memory.event(event_id).get(SHORTLIST)
+        return VendorShortlist.model_validate(snapshot) if snapshot is not None else None
+
+    def _remember_research(self, tasks: list[Task], runs: list[TaskRun], event_id: str) -> None:
+        """File each category's successful research as an event-scoped document for later recall."""
+        if self._memory is None:
+            return
+        for task, run in zip(tasks, runs):
+            content = run.result.answer or (json.dumps(run.result.data) if run.result.data else None)
+            if run.result.succeeded and content:
+                self._memory.semantic.add_document(
+                    content, scope=event_scope(event_id, task.assignee_agent), kind="research", event_id=event_id
+                )
+
+    def _reputation_note(self, plan: EventPlan) -> str | None:
+        """Vendors we've worked with before in the plan's categories, to inform ranking."""
+        if self._memory is None:
+            return None
+        lines = []
+        for category in plan.vendor_categories:
+            for vendor in self._memory.vendors.top_by_category(category.category):
+                if vendor.times_booked or vendor.reliability_rating or vendor.quality_rating:
+                    lines.append(
+                        f"- {vendor.name} ({category.category}): booked {vendor.times_booked}×, "
+                        f"reputation {vendor.reputation_score:.2f}"
+                    )
+        if not lines:
+            return None
+        return "Vendors used on past events (favor proven ones when ranking):\n" + "\n".join(lines)
 
 
 def _render_research_brief(brief: ResearchBrief, budget_usd: float | None) -> str:

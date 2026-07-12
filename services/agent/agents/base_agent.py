@@ -8,13 +8,14 @@ from typing import Any
 from pydantic import BaseModel
 
 from core.config import settings
+from core.security import domain_guardrail
 from integrations.h_company.client import HClient
 from integrations.h_company.schemas import MODEL_DEEP, SessionResult
 from integrations.h_company.session import inline_web_agent
 from models.task import Task
 
 # Appended to every domain agent's instructions. Mirrors the product's approval gates
-# (objective 13, infra/nemoclaw blocked actions): agents research and prepare on their
+# (objective 13; blocked actions live in core.config): agents research and prepare on their
 # own, but sensitive commitments need explicit authorization in the task text itself.
 GUARDRAILS = """\
 Operating rules, in addition to your task:
@@ -52,11 +53,12 @@ class BaseAgent:
 
     def agent_spec(self) -> dict[str, object]:
         """This agent's inline H definition, sent with every session."""
+        parts = [self.instructions, GUARDRAILS, domain_guardrail()]
         return inline_web_agent(
             name=f"occasion-{self.name}",
             description=self.description,
             model=self.model,
-            instructions=f"{self.instructions}\n\n{GUARDRAILS}",
+            instructions="\n\n".join(part for part in parts if part),
             start_url=self.start_url,
             skills=self.skills,
         )

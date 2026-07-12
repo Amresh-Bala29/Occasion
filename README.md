@@ -13,7 +13,7 @@ browser automation, with human approval gates on spending and sensitive actions.
 apps/web            Next.js frontend (dashboard, event workspace, voice, chat)
 services/agent      FastAPI backend — the agent team, workflows, integrations
 packages/shared     JSON Schemas + constants shared across web and agent
-infra/              NemoClaw browser runtime, Dockerfiles, dev scripts
+infra/              Dockerfiles and dev scripts
 docs/               Architecture notes and runbooks
 .github/workflows   CI for web and agent
 ```

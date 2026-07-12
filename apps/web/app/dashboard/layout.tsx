@@ -5,6 +5,11 @@ import { Sidebar } from "@/components/Sidebar";
 import { EventProvider } from "@/hooks/useEvent";
 import { getActivityPool, getDashboardData, getDecisionHistory, getSpendingRules } from "@/lib/api";
 
+// The dashboard renders live per-request event data from the agent service, so it
+// must never be statically prerendered at build time (the backend isn't up then).
+// Set on the shared layout so every nested dashboard route inherits it.
+export const dynamic = "force-dynamic";
+
 /** Shared shell for all event pages: sidebar, main column, and the live agent rail. */
 export default async function DashboardLayout({ children }: { children: ReactNode }) {
   const [data, decisions, rules, activityPool] = await Promise.all([

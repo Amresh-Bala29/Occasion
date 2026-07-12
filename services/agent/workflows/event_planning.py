@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
-from typing import Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 import httpx
 from pydantic import BaseModel, Field
@@ -25,7 +25,12 @@ from agents.requirements_agent import EventRequirements
 from core.orchestrator import Orchestrator, TaskRun
 from integrations.h_company.client import HClient, run_structured_completion
 from integrations.h_company.schemas import MODEL_DEEP, SessionResult
+from memory.event_memory import OPEN_QUESTIONS, PLAN_SNAPSHOT, REQUIREMENTS
+from memory.vector_store import event_scope
 from models.task import Task
+
+if TYPE_CHECKING:
+    from core.state import Memory
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -167,22 +172,39 @@ class EventPlanningWorkflow:
     backs browser sessions, `http_client` backs Models API completions.
     """
 
-    def __init__(self, client: HClient | None = None, http_client: httpx.Client | None = None) -> None:
-        self._orchestrator = Orchestrator(client=client, http_client=http_client)
+    def __init__(
+        self,
+        client: HClient | None = None,
+        http_client: httpx.Client | None = None,
+        *,
+        memory: Memory | None = None,
+    ) -> None:
+        self._orchestrator = Orchestrator(client=client, http_client=http_client, memory=memory)
+        self._memory = memory
         self._http = http_client
 
-    async def run(self, brief: str, *, event_id: str, schedule_deadlines: bool = False) -> PlanningReport:
+    async def run(
+        self, brief: str, *, event_id: str, schedule_deadlines: bool = False, user_id: str | None = None
+    ) -> PlanningReport:
         """Plan the event described by `brief`; browserless unless `schedule_deadlines`."""
         requirements_run = await self._parse_requirements(brief, event_id)
         report = PlanningReport(event_id=event_id, brief=brief, requirements_run=requirements_run)
         report.requirements = structured(requirements_run.result, EventRequirements)
         if report.requirements is None:
             return report  # nothing downstream is meaningful without requirements
+        self._remember_requirements(report.requirements, event_id=event_id, user_id=user_id)
 
-        report.plan_run = await self._synthesize_plan(brief, report.requirements)
-        report.plan = structured(report.plan_run, EventPlan)
+        # A snapshot from a prior run lets a re-run skip the expensive synthesis completion.
+        report.plan = self._recalled_plan(event_id)
         if report.plan is None:
-            return report
+            report.plan_run = await self._synthesize_plan(
+                brief, report.requirements, event_id=event_id, user_id=user_id
+            )
+            report.plan = structured(report.plan_run, EventPlan)
+            if report.plan is None:
+                return report
+            if self._memory is not None:
+                self._memory.event(event_id).set(PLAN_SNAPSHOT, report.plan.model_dump(mode="json"))
 
         report.sourcing_tasks = sourcing_tasks(report.plan, event_id)
         if schedule_deadlines and report.plan.key_deadlines:
@@ -201,16 +223,33 @@ class EventPlanningWorkflow:
         )
         return await self._orchestrator.run_task(task)
 
-    async def _synthesize_plan(self, brief: str, requirements: EventRequirements) -> SessionResult:
-        prompt = "\n\n".join(
-            [
-                f"Client brief:\n{brief}",
-                f"Extracted requirements (JSON):\n{requirements.model_dump_json()}",
-                # The model has no clock, and every deadline offset depends on it.
-                f"Today's date: {date.today().isoformat()}",
-            ]
-        )
-        return await complete(prompt, PLAN_INSTRUCTIONS, EventPlan, http_client=self._http)
+    async def _synthesize_plan(
+        self, brief: str, requirements: EventRequirements, *, event_id: str | None = None, user_id: str | None = None
+    ) -> SessionResult:
+        sections = [
+            f"Client brief:\n{brief}",
+            f"Extracted requirements (JSON):\n{requirements.model_dump_json()}",
+            # The model has no clock, and every deadline offset depends on it.
+            f"Today's date: {date.today().isoformat()}",
+        ]
+        sections.extend(memory_sections(self._memory, brief, event_id=event_id, user_id=user_id))
+        return await complete("\n\n".join(sections), PLAN_INSTRUCTIONS, EventPlan, http_client=self._http)
+
+    def _remember_requirements(self, requirements: EventRequirements, *, event_id: str, user_id: str | None) -> None:
+        """Accumulate this event's stated preferences and snapshot the requirements for resume."""
+        if self._memory is None:
+            return
+        self._memory.preferences.accumulate(requirements, user_id=user_id)
+        event_memory = self._memory.event(event_id)
+        event_memory.set(REQUIREMENTS, requirements.model_dump(mode="json"))
+        if requirements.open_questions:
+            event_memory.set(OPEN_QUESTIONS, requirements.open_questions)
+
+    def _recalled_plan(self, event_id: str) -> EventPlan | None:
+        if self._memory is None:
+            return None
+        snapshot = self._memory.event(event_id).get(PLAN_SNAPSHOT)
+        return EventPlan.model_validate(snapshot) if snapshot is not None else None
 
     async def _schedule_deadlines(self, plan: EventPlan, event_id: str) -> TaskRun:
         lines = ["Create one calendar entry per key deadline below; skip any that already exist."]
@@ -297,6 +336,27 @@ async def complete(
         model=model,
         http_client=http_client,
     )
+
+
+def memory_sections(
+    memory: Memory | None, query: str, *, event_id: str | None = None, user_id: str | None = None
+) -> list[str]:
+    """Preference and recalled-research prompt sections drawn from memory.
+
+    Empty when there is no memory or nothing relevant, so callers append unconditionally.
+    Shared by the planning and sourcing prompts so both fold the same context the same way.
+    """
+    if memory is None:
+        return []
+    sections = []
+    note = memory.preferences.get(user_id).as_prompt_note()
+    if note:
+        sections.append(note)
+    if event_id is not None:
+        hits = memory.semantic.search(query, scope=event_scope(event_id), limit=3)
+        if hits:
+            sections.append("Notes recalled from earlier research:\n" + "\n\n".join(h.document.content for h in hits))
+    return sections
 
 
 def slug(text: str) -> str:

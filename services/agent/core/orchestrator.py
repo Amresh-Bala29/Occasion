@@ -12,7 +12,9 @@ shape the platform rewards (hub.hcompany.ai/computer-use-agents/multi-agent).
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import httpx
 from pydantic import BaseModel, Field
@@ -35,6 +37,11 @@ from core.config import settings
 from integrations.h_company.client import HClient, run_structured_completion
 from integrations.h_company.schemas import DEFAULT_AGENT, MODEL_FAST, SessionResult
 from models.task import Task
+
+if TYPE_CHECKING:
+    from core.state import Memory
+
+logger = logging.getLogger(__name__)
 
 # The domain fleet, in event-lifecycle order — also the order the router reads it in.
 _AGENT_CLASSES: tuple[type[BaseAgent], ...] = (
@@ -133,35 +140,55 @@ class Orchestrator:
     """Routes each task to the right fleet member and runs it as an H session.
 
     `client` backs browser sessions (domain agents and H's managed agents); `http_client`
-    backs Models API calls (routing and the requirements agent). Both default to real
-    settings-backed clients; tests inject fakes through the same seams the agents expose.
+    backs Models API calls (routing and the requirements agent). `memory`, when supplied, is
+    the run's shared memory handle: it rides to each agent as its `context` and to each
+    workflow so reads and writes survive the whole run. All default to None (real
+    settings-backed clients, no memory); tests inject fakes through the same seams.
     """
 
-    def __init__(self, client: HClient | None = None, http_client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        client: HClient | None = None,
+        http_client: httpx.Client | None = None,
+        *,
+        memory: Memory | None = None,
+    ) -> None:
         self._client = client
         self._http = http_client
+        self._memory = memory
 
     async def run_task(self, task: str | Task) -> TaskRun:
         """Run one task on the best agent, recording a routed choice on the Task itself."""
+        task_id = _task_id(task)
         assigned = task.assignee_agent if isinstance(task, Task) else None
         if assigned:
             if assigned not in ROSTER_NAMES:
                 # An explicit assignment we can't honor is a caller bug; rerouting would hide it.
-                return TaskRun(task_id=_task_id(task), result=_error(f"unknown assignee_agent {assigned!r}"))
+                logger.warning("task %s: unknown assignee_agent %r", task_id, assigned)
+                return TaskRun(task_id=task_id, result=_error(f"unknown assignee_agent {assigned!r}"))
             name, reason = assigned, None
         else:
             routed = await self._route(task)
             if isinstance(routed, SessionResult):  # routing itself failed; the result says why
-                return TaskRun(task_id=_task_id(task), result=routed)
+                logger.warning("task %s: routing failed: %s", task_id, routed.error)
+                return TaskRun(task_id=task_id, result=routed)
             name, reason = routed.agent, routed.reason
             if name not in ROSTER_NAMES:
                 # Constrained decoding can still hallucinate a label; the general agent is the safe floor.
+                logger.warning(
+                    "task %s: router named unknown agent %r; falling back to %s", task_id, routed.agent, DEFAULT_AGENT
+                )
                 name, reason = DEFAULT_AGENT, f"router named unknown agent {routed.agent!r}"
             if isinstance(task, Task):
                 # The decision belongs on the domain object; a re-run then skips the router.
                 task.assignee_agent = name
+        logger.info("task %s: dispatching to %s (%s)", task_id, name, reason or "explicit assignment")
         result = await self._dispatch(name, task)
-        return TaskRun(task_id=_task_id(task), agent=name, reason=reason, result=result)
+        if result.succeeded:
+            logger.info("task %s: %s succeeded", task_id, name)
+        else:
+            logger.warning("task %s: %s did not succeed: %s", task_id, name, result.error or result.status)
+        return TaskRun(task_id=task_id, agent=name, reason=reason, result=result)
 
     async def run_tasks(self, tasks: Sequence[str | Task], *, limit: int = 3) -> list[TaskRun]:
         """Run many tasks as independent top-level sessions, at most `limit` at a time.
@@ -208,8 +235,8 @@ class Orchestrator:
             agent_class = DOMAIN_AGENTS[name]
             if agent_class is RequirementsAgent:
                 # The one browserless agent — it talks to the Models API, not a browser.
-                return await RequirementsAgent(http_client=self._http).run(task)
-            return await agent_class(client=self._client).run(task)
+                return await RequirementsAgent(self._memory, http_client=self._http).run(task)
+            return await agent_class(self._memory, client=self._client).run(task)
         return await self._run_builtin(name, task)
 
     async def _run_workflow(self, name: str, task: str | Task) -> SessionResult:
@@ -229,18 +256,18 @@ class Orchestrator:
         from workflows.vendor_sourcing import VendorSourcingWorkflow
 
         stages: dict[str, dict] = {}
-        planning = await EventPlanningWorkflow(client=self._client, http_client=self._http).run(
-            task.title, event_id=task.event_id
-        )
+        planning = await EventPlanningWorkflow(
+            client=self._client, http_client=self._http, memory=self._memory
+        ).run(task.title, event_id=task.event_id, user_id=task.user_id)
         stages["planning"] = planning.model_dump(mode="json")
         if not planning.succeeded:
             return _stage_failure("planning", planning.plan_run or planning.requirements_run.result, stages)
         if name == "workflow/event_planning":
             return _workflow_success(planning.plan.event_summary, stages)
 
-        sourcing = await VendorSourcingWorkflow(client=self._client, http_client=self._http).run(
-            planning.plan, event_id=task.event_id, requirements=planning.requirements
-        )
+        sourcing = await VendorSourcingWorkflow(
+            client=self._client, http_client=self._http, memory=self._memory
+        ).run(planning.plan, event_id=task.event_id, requirements=planning.requirements, user_id=task.user_id)
         stages["sourcing"] = sourcing.model_dump(mode="json")
         if not sourcing.succeeded:
             return _stage_failure("sourcing", sourcing.shortlist_run, stages)
@@ -251,9 +278,9 @@ class Orchestrator:
             )
             return _workflow_success(summary, stages)
 
-        outreach = await VendorOutreachWorkflow(client=self._client, http_client=self._http).run(
-            sourcing.shortlist, event_id=task.event_id, plan=planning.plan
-        )
+        outreach = await VendorOutreachWorkflow(
+            client=self._client, http_client=self._http, memory=self._memory
+        ).run(sourcing.shortlist, event_id=task.event_id, plan=planning.plan)
         stages["outreach"] = outreach.model_dump(mode="json")
         if not outreach.succeeded:
             return _stage_failure("outreach", outreach.comparison_run, stages)

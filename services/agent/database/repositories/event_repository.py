@@ -10,15 +10,28 @@ only the two that genuinely reconcile — `agentsWorking` and `messagesCount`.
 from __future__ import annotations
 
 import re
+from datetime import date
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from database import models as orm
 from models import web
 
+if TYPE_CHECKING:
+    from agents.budget_agent import BudgetReview
+    from agents.requirements_agent import EventRequirements
+    from workflows.event_planning import EventPlan
+
 # "Purchasing agent" -> "Purchasing" for the decision/activity copy, matching the client.
 _AGENT_SUFFIX = re.compile(r" agent$", re.IGNORECASE)
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower())[:40].strip("-")
+    return slug or "action"
 
 
 class EventRepository:
@@ -144,6 +157,10 @@ class EventRepository:
         rows = self._ordered(orm.SpendingRule, orm.SpendingRule.event_id == event_id)
         return [web.SpendingRule.model_validate(r) for r in rows]
 
+    def get_auto_approve_limit(self, event_id: str) -> str | None:
+        event = self.db.get(orm.Event, event_id)
+        return event.auto_approve_limit if event else None
+
     def get_post_event_tasks(self, event_id: str) -> list[web.PostEventTask]:
         rows = self._ordered(orm.PostEventTask, orm.PostEventTask.event_id == event_id)
         return [web.PostEventTask.model_validate(t) for t in rows]
@@ -155,6 +172,116 @@ class EventRepository:
         return [web.ActivityItem.model_validate(a) for a in rows]
 
     # ---- Writes ----
+
+    def save_plan(
+        self,
+        event_id: str,
+        plan: EventPlan,
+        *,
+        requirements: EventRequirements | None = None,
+        budget_review: BudgetReview | None = None,
+        today: date | None = None,
+    ) -> None:
+        """Replace this event's plan/budget/risk rows with ones derived from `plan`.
+
+        The planning modules turn the pipeline's EventPlan (optionally enriched by the
+        budget agent's review) into ORM rows; this writes them as one transaction, clearing
+        the prior plan first so re-planning is idempotent. The event row must already exist
+        — its plan children foreign-key to it. Imported here, not at module top, so serving
+        the read-only dashboard never loads the agent/workflow stack.
+        """
+        from planning.budget_optimizer import BudgetOptimizer
+        from planning.constraints import PlanningConstraints
+        from planning.risk_analyzer import RiskAnalyzer
+        from planning.schedule_optimizer import ScheduleOptimizer
+        from planning.task_graph import TaskGraph
+
+        today = today or date.today()
+        constraints = PlanningConstraints.from_requirements(requirements)
+        graph = TaskGraph.from_plan(plan)
+        budget = BudgetOptimizer(plan, constraints=constraints, review=budget_review).build(event_id)
+        risks = RiskAnalyzer(
+            plan,
+            constraints=constraints,
+            today=today,
+            over_budget_usd=budget.over_budget_usd,
+            budget_review=budget_review,
+        ).rows(event_id)
+        milestones = ScheduleOptimizer(plan).rows(event_id, today=today)
+
+        self._clear_plan(event_id)
+        for phase in graph.phase_rows(event_id):
+            self.db.add(phase)
+        for group in graph.group_rows(event_id):
+            group_row = orm.PlanTaskGroup(
+                event_id=event_id, name=group.name, owner=group.owner, tone=group.tone, ordinal=group.ordinal
+            )
+            self.db.add(group_row)
+            self.db.flush()  # assign group_row.id before its tasks reference it
+            for task in group.tasks:
+                task.group_id = group_row.id
+                self.db.add(task)
+        for row in (*risks, *milestones, *budget.categories, *budget.savings):
+            self.db.add(row)
+
+        event = self.db.get(orm.Event, event_id)
+        if event is not None:
+            event.total_usd = budget.total_usd
+            event.paid_usd = budget.paid_usd
+            event.pending_usd = budget.pending_usd
+            event.percent_complete = graph.percent_complete()
+            event.savings_footnote = budget.footnote
+        self.db.commit()
+
+    def create_approval(
+        self,
+        *,
+        event_id: str,
+        kind: str,
+        agent: str,
+        agent_tone: str,
+        tag: str,
+        title: str,
+        description: str,
+        amount: str,
+        vendor: str,
+        thread_id: str | None = None,
+    ) -> web.ApprovalItem:
+        # New row leads the pending list; a matching feed line mirrors resolve_approval.
+        agent_name = _AGENT_SUFFIX.sub("", agent)
+        approval = orm.Approval(
+            id=f"approval-{_slugify(title)}-{uuid4().hex[:6]}",
+            event_id=event_id,
+            kind=kind,
+            agent=agent,
+            agent_tone=agent_tone,
+            tag=tag,
+            title=title,
+            description=description,
+            amount=amount,
+            vendor=vendor,
+            thread_id=thread_id,
+            resolved=False,
+            ordinal=self._lead_ordinal(orm.Approval, orm.Approval.event_id == event_id),
+        )
+        activity = orm.ActivityItem(
+            id=f"activity-{approval.id}",
+            event_id=event_id,
+            agent=agent_name,
+            tone="amber",
+            time_ago="just now",
+            description=f"{agent_name} flagged {title} — {amount} for your approval.",
+            pool=False,
+            ordinal=self._lead_ordinal(
+                orm.ActivityItem,
+                orm.ActivityItem.event_id == event_id,
+                orm.ActivityItem.pool.is_(False),
+            ),
+        )
+        self.db.add(approval)
+        self.db.add(activity)
+        self.db.commit()
+        return web.ApprovalItem.model_validate(approval)
 
     def resolve_approval(self, approval_id: str, approved: bool) -> web.DecisionRecord | None:
         approval = self.db.get(orm.Approval, approval_id)
@@ -217,6 +344,19 @@ class EventRepository:
     def _ordered(self, model, *conditions):
         stmt = select(model).where(*conditions).order_by(model.ordinal)
         return list(self.db.scalars(stmt).all())
+
+    def _clear_plan(self, event_id: str) -> None:
+        # Drop the whole plan/budget/risk set for this event; deleting the task groups
+        # cascades to their tasks at the database level.
+        for model in (
+            orm.PlanPhase,
+            orm.PlanTaskGroup,
+            orm.RiskItem,
+            orm.Milestone,
+            orm.BudgetCategory,
+            orm.SavingSuggestion,
+        ):
+            self.db.execute(delete(model).where(model.event_id == event_id))
 
     def _deadlines(self, event_id: str, list_kind: str) -> list[web.DeadlineItem]:
         rows = self._ordered(

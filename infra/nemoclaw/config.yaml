@@ -1,9 +1,0 @@
-# NemoClaw runtime configuration — the sandboxed browser the agents drive.
-runtime:
-  headless: true
-  timeout_seconds: 120
-  viewport:
-    width: 1280
-    height: 800
-screenshots:
-  enabled: true

@@ -203,6 +203,38 @@ def test_agent_view_url_is_best_effort() -> None:
     assert result.agent_view_url is None
 
 
+def test_from_settings_defaults_to_sdk_region(monkeypatch) -> None:
+    # No session base configured: the SDK's own default region (EU AGP host) must win —
+    # the Models API host must never leak into session calls (it 404s them).
+    recorded: list[dict] = []
+
+    class RecordingClient:
+        def __init__(self, **kwargs) -> None:
+            recorded.append(kwargs)
+
+    monkeypatch.setattr("hai_agents.Client", RecordingClient)
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    monkeypatch.setattr(settings, "hai_session_base_url", "")
+    HClient.from_settings()
+
+    assert recorded == [{"api_key": "hk-test"}]
+
+
+def test_from_settings_honors_session_base_url(monkeypatch) -> None:
+    recorded: list[dict] = []
+
+    class RecordingClient:
+        def __init__(self, **kwargs) -> None:
+            recorded.append(kwargs)
+
+    monkeypatch.setattr("hai_agents.Client", RecordingClient)
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    monkeypatch.setattr(settings, "hai_session_base_url", "https://agp.hcompany.ai")
+    HClient.from_settings()
+
+    assert recorded == [{"api_key": "hk-test", "base_url": "https://agp.hcompany.ai"}]
+
+
 def test_run_browser_task_requires_api_key(monkeypatch) -> None:
     monkeypatch.setattr(settings, "hai_api_key", "")
     # A client whose call would blow up, proving we never reach it without a key.
@@ -384,6 +416,7 @@ def test_agent_specs_are_wire_valid() -> None:
 
 def test_requirements_agent_extracts_requirements(monkeypatch) -> None:
     monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    monkeypatch.setattr(settings, "hai_models_base_url", "https://models.test/v1")
     seen: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -403,7 +436,8 @@ def test_requirements_agent_extracts_requirements(monkeypatch) -> None:
     assert result.data["headcount"] == 150
     assert result.data["open_questions"] == ["What is the budget?"]
     request = seen[0]
-    assert request.url.path.endswith("/chat/completions")
+    # The full URL proves completions target the Models host, not the sessions host.
+    assert str(request.url) == "https://models.test/v1/chat/completions"
     assert request.headers["authorization"] == "Bearer hk-test"
     body = json.loads(request.content)
     assert body["model"] == MODEL_DEEP

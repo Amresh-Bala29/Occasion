@@ -7,7 +7,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import approvals, chat, computer_use, events, voice, webhooks
+from core.logging import configure_logging
 from database.connection import dispose
+
+configure_logging()
 
 
 @asynccontextmanager

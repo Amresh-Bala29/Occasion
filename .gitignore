@@ -45,7 +45,7 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
-# Infrastructure (infra/nemoclaw)
+# Infrastructure
 *.tfstate
 *.tfstate.*
 .terraform/
