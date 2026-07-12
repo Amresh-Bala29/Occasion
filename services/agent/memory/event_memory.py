@@ -18,6 +18,9 @@ REQUIREMENTS = "requirements"
 PLAN_SNAPSHOT = "plan_snapshot"
 OPEN_QUESTIONS = "open_questions"
 SHORTLIST = "shortlist"
+# Demo shortcut, not a workflow snapshot: holds the id of a curated fixture event whose
+# rows the dashboard reads in place of this event's own (see EventRepository._resolve_demo).
+DEMO_FIXTURE = "demo_fixture"
 
 
 class EventMemory:

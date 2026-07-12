@@ -6,6 +6,8 @@ calls in its threadpool. `response_model_exclude_none` keeps optional fields abs
 (not null) so the JSON matches the mock exactly.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -13,16 +15,26 @@ from api.dependencies import get_event_repository, get_run_manager, get_supervis
 from approvals.approval_manager import ApprovalManager, ProposedAction
 from approvals.sensitive_actions import ActionCategory
 from core.runs import RunManager
-from core.supervisor import EventSessionsReport, Supervisor
+from core.supervisor import EventSessionsReport, SessionFrame, SessionHealth, Supervisor
 from database.repositories.event_repository import EventRepository
 from models import web
 from workflows.event_planning import VendorCategory
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
 class AutoApproveLimitBody(BaseModel):
     limit: str
+
+
+class UpdateEventBody(BaseModel):
+    name: str | None = None
+    kind: str | None = None
+    date: str | None = None
+    location: str | None = None
+    headcount: str | None = None
 
 
 class CreateEventBody(BaseModel):
@@ -156,6 +168,23 @@ def set_auto_approve_limit(
     return {"autoApproveLimit": value}
 
 
+@router.patch("/{event_id}", response_model=web.EventOverview)
+def update_event(
+    event_id: str, body: UpdateEventBody, repo: EventRepository = Depends(get_event_repository)
+) -> web.EventOverview:
+    event = repo.update_event(
+        event_id,
+        name=body.name,
+        kind=body.kind,
+        date=body.date,
+        location=body.location,
+        headcount=body.headcount,
+    )
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"Event {event_id!r} not found")
+    return event
+
+
 @router.post("/{event_id}/bookings", response_model=BookingProposalResult, response_model_exclude_none=True)
 def propose_booking(
     event_id: str,
@@ -181,6 +210,8 @@ def propose_booking(
             "price_notes": body.price_notes,
         },
         "budget_cap_usd": body.budget_cap_usd,
+        # Carried so the confirmed vendor row can show the approved amount as its cost.
+        "amount_usd": body.amount_usd,
     }
     decision = ApprovalManager(repo).review(
         ProposedAction(
@@ -210,3 +241,55 @@ def get_agent_sessions(event_id: str, supervisor: Supervisor = Depends(get_super
     scoping needs no DB), and a missing key or H failure is succeeded=False, not a raise.
     """
     return supervisor.event_sessions(event_id)
+
+
+@router.get(
+    "/{event_id}/sessions/{session_id}/health", response_model=SessionHealth, response_model_exclude_none=True
+)
+def get_session_health(
+    event_id: str, session_id: str, supervisor: Supervisor = Depends(get_supervisor)
+) -> SessionHealth:
+    """Live health for one session — the chat ticker's step counter.
+
+    event_id keeps the read surface event-scoped; H session ids are global, so it
+    isn't checked. Always 200 with an honest report, like agent-sessions.
+    """
+    return supervisor.session_health(session_id)
+
+
+@router.get(
+    "/{event_id}/sessions/{session_id}/frame", response_model=SessionFrame, response_model_exclude_none=True
+)
+def get_session_frame(
+    event_id: str,
+    session_id: str,
+    supervisor: Supervisor = Depends(get_supervisor),
+    repo: EventRepository = Depends(get_event_repository),
+) -> SessionFrame:
+    """The newest browser screenshot for one session — a live-grid tile.
+
+    event_id keeps the read surface event-scoped; H session ids are global, so it
+    isn't checked. Always 200 with an honest report, like health.
+    """
+    frame = supervisor.session_frame(session_id)
+    # Durable trace of cleared obstacles: the frame poll is the only place obstacle
+    # detection runs (H has no webhooks), and drain-once means each line lands in the
+    # feed exactly once even with concurrent viewers. A write failure must never cost
+    # the tile its frame.
+    try:
+        for line in supervisor.drain_obstacle_feed(session_id):
+            repo.add_activity(
+                event_id,
+                agent=_obstacle_agent(line.agent),
+                tone="green",
+                description=f"✓ {line.label[:1].upper()}{line.label[1:]} — kept going.",
+            )
+    except Exception:
+        logger.exception("failed to record cleared obstacles for session %s", session_id)
+    return frame
+
+
+def _obstacle_agent(agent: str | None) -> str:
+    """Feed byline for an obstacle line: "occasion-venue" -> "Venue agent"."""
+    name = (agent or "").removeprefix("occasion-").strip()
+    return f"{name.capitalize()} agent" if name else "Web agent"

@@ -88,10 +88,28 @@ def browser_failure(error: str = "session crashed") -> SimpleNamespace:
     return fake_result(status="failed", error=error)
 
 
+def browser_partial(answer: object) -> SimpleNamespace:
+    # A run that settled with findings but self-assessed as incomplete (AGP does this).
+    return fake_result(status="idle", outcome="partial", answer=answer)
+
+
 class FakeResearch(BaseModel):
     """Stands in for a domain agent's answer schema; only its `.data` dump matters."""
 
     options: list[dict] = []
+
+
+class FakeActResearch(BaseModel):
+    """An entertainment-shaped answer: acts under act_name, plus a recommendation."""
+
+    options: list[dict] = []
+    recommended: str | None = None
+
+
+class FakeStaffingResearch(BaseModel):
+    """A staffing-shaped answer: candidates keyed by role/source, no options list."""
+
+    candidates: list[dict] = []
 
 
 def completion_script(*entries: dict | int) -> tuple[httpx.Client, list[httpx.Request]]:
@@ -401,6 +419,201 @@ def test_sourcing_research_failure_becomes_model_visible_gap(monkeypatch) -> Non
     assert report.succeeded is True  # the shortlist still parsed, gap and all
 
 
+def test_sourcing_partial_research_with_data_feeds_synthesis(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(
+        routes=[
+            ("peerspace", browser_partial(FakeResearch(options=[{"name": "The Grand Hall"}]))),
+            ("corporate+catering", browser_success(FakeResearch(options=[{"name": "Verde Catering"}]))),
+        ]
+    )
+    http, requests = completion_script(briefs_content(), shortlist_content())
+    flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http)
+
+    report = asyncio.run(flow.run(make_plan(), event_id="evt-9"))
+
+    assert report.research_runs[0].result.succeeded is False  # partial is still not a success
+    synthesis_prompt = request_text(requests[-1])
+    assert "venue research (JSON, incomplete: partial)" in synthesis_prompt
+    assert "The Grand Hall" in synthesis_prompt  # the partial run's findings made it in
+    assert "RESEARCH FAILED" not in synthesis_prompt
+    assert report.succeeded is True
+
+
+def test_sourcing_retries_an_empty_shortlist_once(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(default=browser_success(FakeResearch(options=[{"name": "The Grand Hall"}])))
+    http, requests = completion_script(briefs_content(), {"candidates": []}, shortlist_content())
+    flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http)
+
+    report = asyncio.run(flow.run(make_plan(), event_id="evt-9"))
+
+    assert len(requests) == 3  # briefs, empty shortlist, retried shortlist
+    assert report.succeeded is True
+    assert report.shortlist.candidates
+
+
+def test_sourcing_empty_shortlist_fails_with_enforced_gaps(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    # Optionless research: the code-built fallback has nothing to shortlist either.
+    sdk = FakeSDK(default=browser_success(FakeResearch()))
+    http, requests = completion_script(
+        briefs_content(), {"candidates": []}, {"candidates": [], "next_steps": ["keep looking"]}
+    )
+    flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http)
+
+    report = asyncio.run(flow.run(make_plan(), event_id="evt-9"))
+
+    assert len(requests) == 3  # the one retry was spent
+    assert report.succeeded is False  # a tidy shortlist of nothing is still a failed round
+    assert sorted(report.shortlist.gaps) == [
+        "catering: research found no viable candidates",
+        "venue: research found no viable candidates",
+    ]
+
+
+def test_sourcing_falls_back_to_code_built_shortlist_when_synthesis_drops_findings(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(
+        routes=[
+            (
+                "peerspace",
+                browser_success(
+                    FakeResearch(
+                        options=[
+                            {
+                                "name": "The Grand Hall",
+                                "url": "https://grandhall.example.com",
+                                "price_notes": "$7,500 full day",
+                                "availability": "2026-09-10 open",
+                                "contact_path": "https://grandhall.example.com/contact",
+                                "pros": ["Seats 180", "AV included"],
+                            },
+                            {"name": "Riverside Loft", "url": "https://riversideloft.example.com"},
+                        ]
+                    )
+                ),
+            ),
+            (
+                "corporate+catering",
+                browser_success(
+                    FakeResearch(
+                        options=[
+                            {
+                                "name": "Verde Catering",
+                                "url": "https://verdecatering.example.com",
+                                "price_per_person": "$38/person",
+                                "contact_path": "quotes@verdecatering.example.com",
+                            }
+                        ]
+                    )
+                ),
+            ),
+        ]
+    )
+    # The synthesis returns nothing twice; the findings must still become a shortlist.
+    http, requests = completion_script(briefs_content(), {"candidates": []}, {"candidates": []})
+    flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http)
+
+    report = asyncio.run(flow.run(make_plan(), event_id="evt-9"))
+
+    assert len(requests) == 3  # briefs, empty shortlist, retried shortlist
+    assert report.succeeded is True
+    assert report.shortlist.gaps == []
+    grand_hall, riverside, verde = report.shortlist.candidates
+    assert (grand_hall.category, grand_hall.rank) == ("venue", 1)
+    assert grand_hall.price_notes == "$7,500 full day"
+    assert grand_hall.availability == "2026-09-10 open"
+    assert grand_hall.contact_path == "https://grandhall.example.com/contact"
+    assert grand_hall.fit_rationale == "Seats 180; AV included"
+    assert (riverside.name, riverside.rank) == ("Riverside Loft", 2)
+    assert (verde.category, verde.rank) == ("catering", 1)
+    assert verde.price_notes == "$38/person"  # per-person pricing maps into price_notes
+    # The audit record stays the real synthesis answer, not the code-built rescue.
+    assert report.shortlist_run.data["candidates"] == []
+
+
+def test_sourcing_fallback_survives_a_failed_synthesis_and_maps_act_name(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    plan = EventPlan.model_validate(
+        {
+            "event_summary": "A 150-person launch party.",
+            "vendor_categories": [{"category": "entertainment", "requirements_summary": "A live act for 150."}],
+        }
+    )
+    sdk = FakeSDK(
+        default=browser_success(
+            FakeActResearch(
+                options=[{"act_name": "The Margarita Brothers", "url": "https://gigsalad.example.com/margarita"}],
+                recommended="The Margarita Brothers",
+            )
+        )
+    )
+    http, requests = completion_script({"briefs": []}, 500)
+    flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http)
+
+    report = asyncio.run(flow.run(plan, event_id="evt-9"))
+
+    assert len(requests) == 2  # briefs, then the one synthesis attempt — no retry after a hard failure
+    assert report.succeeded is True
+    (act,) = report.shortlist.candidates
+    assert (act.category, act.name) == ("entertainment", "The Margarita Brothers")
+    assert act.fit_rationale == "Recommended by the entertainment research"
+    assert report.shortlist_run.succeeded is False  # the failed synthesis stays on record
+
+
+def test_sourcing_fallback_reads_the_staffing_answer_shape(monkeypatch) -> None:
+    # Staffing answers {candidates: [...]} with role/source fields, not {options: [...]}
+    # with name — the fallback must still rescue those findings.
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    plan = EventPlan.model_validate(
+        {
+            "event_summary": "A 150-person launch party.",
+            "vendor_categories": [{"category": "staffing", "requirements_summary": "Two bartenders."}],
+        }
+    )
+    sdk = FakeSDK(
+        default=browser_success(
+            FakeStaffingResearch(
+                candidates=[
+                    {
+                        "role": "Bartender",
+                        "source": "StaffedUp",
+                        "url": "https://staffedup.example.com/bartenders",
+                        "rate_notes": "$45/hr",
+                        "availability": "Aug 15 evening",
+                        "contact_path": "https://staffedup.example.com/contact",
+                    }
+                ]
+            )
+        )
+    )
+    http, _ = completion_script({"briefs": []}, 500)
+    flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http)
+
+    report = asyncio.run(flow.run(plan, event_id="evt-9"))
+
+    assert report.succeeded is True
+    (candidate,) = report.shortlist.candidates
+    assert (candidate.category, candidate.name) == ("staffing", "Bartender (StaffedUp)")
+    assert candidate.price_notes == "$45/hr"
+    assert candidate.contact_path == "https://staffedup.example.com/contact"
+
+
+def test_sourcing_missing_category_gets_a_deterministic_gap(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    venue_only = {"candidates": [c for c in shortlist_content()["candidates"] if c["category"] == "venue"]}
+    sdk = FakeSDK(default=browser_success(FakeResearch()))
+    http, _ = completion_script(briefs_content(), venue_only)
+    flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http)
+
+    report = asyncio.run(flow.run(make_plan(), event_id="evt-9"))
+
+    assert report.succeeded is True
+    # The synthesis forgot catering; the gap is appended in code, not left to the model.
+    assert report.shortlist.gaps == ["catering: research found no viable candidates"]
+
+
 def test_sourcing_discovery_feeds_the_brief_compiler(monkeypatch) -> None:
     monkeypatch.setattr(settings, "hai_api_key", "hk-test")
     sdk = FakeSDK(
@@ -424,7 +637,8 @@ def test_sourcing_discovery_feeds_the_brief_compiler(monkeypatch) -> None:
 
 def test_sourcing_synthesis_failure_preserves_research(monkeypatch) -> None:
     monkeypatch.setattr(settings, "hai_api_key", "hk-test")
-    sdk = FakeSDK(default=browser_success(FakeResearch(options=[{"name": "The Grand Hall"}])))
+    # Optionless research keeps the fallback out of play; the failure must surface.
+    sdk = FakeSDK(default=browser_success(FakeResearch()))
     http, _ = completion_script(briefs_content(), 500)
     flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http)
 
@@ -434,7 +648,7 @@ def test_sourcing_synthesis_failure_preserves_research(monkeypatch) -> None:
     assert report.shortlist is None
     # The expensive browser findings survive the failed synthesis.
     assert len(report.research_runs) == 2
-    assert all(run.result.data == {"options": [{"name": "The Grand Hall"}]} for run in report.research_runs)
+    assert all(run.result.data == {"options": []} for run in report.research_runs)
 
 
 def test_book_embeds_approval_and_routes_to_the_specialist(monkeypatch) -> None:
@@ -697,6 +911,57 @@ def test_orchestrator_chains_planning_into_a_routed_sourcing_workflow(monkeypatc
     assert {call["agent"]["name"] for call in sdk.calls} == {"occasion-venue", "occasion-catering"}
     assert run.result.answer == "Shortlisted 4 vendors across 2 categories; gaps: 0."
     assert len(requests) == 5  # route, requirements, plan, briefs, shortlist
+
+
+def test_orchestrator_reports_an_empty_shortlist_honestly(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    # Optionless research: the code-built fallback can't rescue this round either.
+    sdk = FakeSDK(default=browser_success(FakeResearch()))
+    http, _ = completion_script(
+        requirements_content(), plan_content(), briefs_content(), {"candidates": []}, {"candidates": []}
+    )
+    task = Task(id="t1", event_id="evt-9", title="Source vendors", assignee_agent="workflow/vendor_sourcing")
+
+    run = asyncio.run(Orchestrator(client=HClient(sdk), http_client=http).run_task(task))
+
+    assert run.result.succeeded is False
+    # Not "did not succeed: completed" — the synthesis run finished; its content was the problem.
+    assert run.result.error == "sourcing stage did not succeed: shortlist came back empty; gaps: 2"
+    assert set(run.result.data) == {"planning", "sourcing"}  # the plan still rides along for publishing
+
+
+def test_orchestrator_reports_stages_to_the_on_stage_hook(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(default=browser_success(FakeResearch()))
+    http, _ = completion_script(requirements_content(), plan_content(), briefs_content(), shortlist_content())
+    task = Task(id="t1", event_id="evt-9", title="Source vendors", assignee_agent="workflow/vendor_sourcing")
+    orchestrator = Orchestrator(client=HClient(sdk), http_client=http)
+    seen: list[tuple[str, dict]] = []
+    orchestrator.on_stage = lambda stage, payload: seen.append((stage, payload))
+
+    run = asyncio.run(orchestrator.run_task(task))
+
+    assert run.result.succeeded is True
+    assert [stage for stage, _ in seen] == ["planning", "sourcing"]
+    assert seen[0][1]["plan"]["event_summary"] == plan_content()["event_summary"]
+    assert seen[1][1]["shortlist"]["candidates"]
+
+
+def test_orchestrator_survives_a_raising_on_stage_hook(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(default=browser_success(FakeResearch()))
+    http, _ = completion_script(requirements_content(), plan_content(), briefs_content(), shortlist_content())
+    task = Task(id="t1", event_id="evt-9", title="Source vendors", assignee_agent="workflow/vendor_sourcing")
+    orchestrator = Orchestrator(client=HClient(sdk), http_client=http)
+
+    def explode(stage: str, payload: dict) -> None:
+        raise RuntimeError("publish hook blew up")
+
+    orchestrator.on_stage = explode
+
+    run = asyncio.run(orchestrator.run_task(task))
+
+    assert run.result.succeeded is True  # the observer must never fail the workflow
 
 
 def test_orchestrator_workflow_chain_stops_at_a_failed_gate(monkeypatch) -> None:

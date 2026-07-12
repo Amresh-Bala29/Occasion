@@ -13,6 +13,8 @@ import type {
   EventPlan,
   EventSessionsReport,
   PostEventTask,
+  SessionFrame,
+  SessionHealth,
   SpendingRule,
   TranscriptionResult,
   Vendor,
@@ -32,6 +34,15 @@ export const DEFAULT_EVENT_ID = "novaflow-summit-2026";
 
 /** Cookie holding the active event id; set by the sidebar switcher, read by server pages. */
 export const EVENT_COOKIE = "occasion_event";
+
+// The two hardcoded demo events (backend seed + core/runs _DEMO_KEYWORDS). When their data
+// is showing, the right rail drops the static agent list so Live Browsers leads. A redirected
+// event still reports the fixture's id as `dashboard.event.id`, so this catches both paths.
+export const DEMO_FIXTURE_IDS = ["rooftop-party", "hackathon"];
+
+export function isDemoFixture(eventId: string): boolean {
+  return DEMO_FIXTURE_IDS.includes(eventId);
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -56,7 +67,7 @@ async function readErrorDetail(response: Response): Promise<string> {
   }
 }
 
-function sendJson<T>(path: string, method: "POST" | "PUT", body: unknown): Promise<T> {
+function sendJson<T>(path: string, method: "POST" | "PUT" | "PATCH", body: unknown): Promise<T> {
   return request<T>(path, {
     method,
     headers: { "Content-Type": "application/json" },
@@ -68,14 +79,27 @@ function sendJson<T>(path: string, method: "POST" | "PUT", body: unknown): Promi
  * Send one conversational turn to the orchestrator. The run starts in the
  * background and this resolves immediately with its `running` record; follow up
  * with awaitRun (or getRun) until it settles — browser tasks can take minutes.
+ * Passing `agent` pins the run to that fleet member instead of routing (the
+ * intake interview pins "requirements").
  */
-export function sendChatMessage(message: string, eventId: string | null): Promise<AgentRunRecord> {
-  return sendJson<AgentRunRecord>("/chat", "POST", { message, event_id: eventId });
+export function sendChatMessage(message: string, eventId: string | null, agent?: string): Promise<AgentRunRecord> {
+  return sendJson<AgentRunRecord>("/chat", "POST", { message, event_id: eventId, agent: agent ?? null });
 }
 
 /** One background run's current state. */
 export function getRun(runId: string): Promise<AgentRunRecord> {
   return request<AgentRunRecord>(`/runs/${runId}`);
+}
+
+/**
+ * One event's chat runs, oldest first — the durable thread log in the agent's
+ * database. The chat rebuilds its history from this when local storage is empty
+ * (new browser, cleared storage), so a project's conversation survives the device.
+ */
+export function getEventRuns(eventId: string, kind = "chat"): Promise<AgentRunRecord[]> {
+  return request<AgentRunRecord[]>(
+    `/runs?event_id=${encodeURIComponent(eventId)}&kind=${encodeURIComponent(kind)}`,
+  );
 }
 
 const RUN_POLL_MS = 2500;
@@ -100,9 +124,27 @@ export function getEvents(): Promise<EventOverview[]> {
   return request<EventOverview[]>("/events");
 }
 
+/**
+ * Provision a fresh, empty event (project) and return its overview, including the
+ * new slug id. Display fields start neutral; the intake interview fills them in.
+ */
+export function createEvent(name: string = "Untitled event"): Promise<EventOverview> {
+  return sendJson<EventOverview>("/events", "POST", { name });
+}
+
 /** Live H browser sessions for the event; the agent rail polls this. */
 export function getAgentSessions(eventId: string): Promise<EventSessionsReport> {
   return request<EventSessionsReport>(`/events/${eventId}/agent-sessions`);
+}
+
+/** Live health for one session — the chat ticker's step counter. */
+export function getSessionHealth(eventId: string, sessionId: string): Promise<SessionHealth> {
+  return request<SessionHealth>(`/events/${eventId}/sessions/${encodeURIComponent(sessionId)}/health`);
+}
+
+/** The newest browser screenshot for one session — a live-grid tile. */
+export function getSessionFrame(eventId: string, sessionId: string): Promise<SessionFrame> {
+  return request<SessionFrame>(`/events/${eventId}/sessions/${encodeURIComponent(sessionId)}/frame`);
 }
 
 /** The real activity feed — what agents actually did — newest first. */
@@ -206,4 +248,12 @@ export function toggleSpendingRule(eventId: string, ruleId: string): Promise<Spe
 /** Persist the auto-approve limit (a preformatted string like "$500"). */
 export async function saveAutoApproveLimit(eventId: string, limit: string): Promise<void> {
   await sendJson<{ autoApproveLimit: string }>(`/events/${eventId}/auto-approve-limit`, "PUT", { limit });
+}
+
+/** Patch user-editable event descriptors; returns the updated overview. */
+export function updateEventDetails(
+  eventId: string,
+  patch: Partial<Pick<EventOverview, "name" | "kind" | "date" | "location" | "headcount">>,
+): Promise<EventOverview> {
+  return sendJson<EventOverview>(`/events/${eventId}`, "PATCH", patch);
 }

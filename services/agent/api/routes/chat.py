@@ -16,6 +16,9 @@ class ChatRequest(BaseModel):
 
     message: str = Field(..., min_length=1)
     event_id: str | None = None
+    # Pins the run to one fleet member (the intake page pins "requirements"),
+    # skipping the router. Rides on the Task, so it needs event_id to take effect.
+    agent: str | None = None
 
 
 @router.post("", response_model=RunRecord)
@@ -26,4 +29,4 @@ async def chat(request: ChatRequest, runs: RunManager = Depends(get_run_manager)
     take minutes — so clients poll GET /runs/{id} until the record settles.
     Routing and agent failures land inside the settled record, never as HTTP errors.
     """
-    return runs.start_chat(request.message, request.event_id)
+    return runs.start_chat(request.message, request.event_id, agent=request.agent)

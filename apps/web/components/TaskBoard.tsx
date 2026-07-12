@@ -2,10 +2,7 @@
 
 import { useState } from "react";
 
-import { PlanChat } from "@/components/PlanChat";
 import type { EventPlan, Milestone, PlanPhase, PlanTaskGroup, RiskItem, Tone } from "@/types";
-
-type PlanView = "board" | "chat";
 
 const DOT_CLASS: Record<Tone, string> = {
   green: "dot-green",
@@ -14,10 +11,8 @@ const DOT_CLASS: Record<Tone, string> = {
   gray: "dot-gray",
 };
 
-/** The plan panel: a phases/tasks/risks/milestones board, with a toggle into
- * the Occasion chat that runs real agent tasks. */
-export function TaskBoard({ eventId, plan }: { eventId: string; plan: EventPlan }) {
-  const [view, setView] = useState<PlanView>("board");
+/** The plan panel: a phases/tasks/risks/milestones board. */
+export function TaskBoard({ plan }: { plan: EventPlan }) {
   // Checkbox state lives here so the "X / Y done" counter tracks toggles.
   const [taskDone, setTaskDone] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(plan.groups.flatMap((group) => group.tasks.map((task) => [task.id, task.done]))),
@@ -27,25 +22,13 @@ export function TaskBoard({ eventId, plan }: { eventId: string; plan: EventPlan 
     setTaskDone((prev) => ({ ...prev, [id]: !prev[id] }));
   }
 
-  if (view === "chat") {
-    // PlanChat brings its own <main> and composer, so only the header wraps it here.
-    return (
-      <>
-        <div className="mx-auto w-full max-w-[1010px] px-6 pt-[22px]">
-          <PlanHeader view={view} onViewChange={setView} />
-        </div>
-        <PlanChat eventId={eventId} />
-      </>
-    );
-  }
-
   const totalCount = Object.keys(taskDone).length;
   const doneCount = Object.values(taskDone).filter(Boolean).length;
 
   return (
     <main className="mx-auto flex w-full max-w-[1010px] flex-col px-6 pt-[22px] pb-10">
       <div className="max-w-[1000px]">
-        <PlanHeader view={view} onViewChange={setView} />
+        <PlanHeader />
 
         <PhasesCard phases={plan.phases} />
 
@@ -74,48 +57,15 @@ export function TaskBoard({ eventId, plan }: { eventId: string; plan: EventPlan 
   );
 }
 
-function PlanHeader({ view, onViewChange }: { view: PlanView; onViewChange: (view: PlanView) => void }) {
+function PlanHeader() {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-4">
-      <div>
-        <h1 className="font-serif text-[28px] font-medium tracking-[-0.01em]">Event plan</h1>
-        <p className="mt-1.5 text-[14px] text-ink-soft">
-          Occasion generated this plan from your requirements and keeps it in sync as agents complete
-          work.
-        </p>
-      </div>
-      <div className="flex rounded-full border border-line bg-surface p-[3px]" role="group" aria-label="Plan view">
-        <ViewToggleSegment active={view === "board"} onClick={() => onViewChange("board")}>
-          Plan board
-        </ViewToggleSegment>
-        <ViewToggleSegment active={view === "chat"} onClick={() => onViewChange("chat")}>
-          Ask Occasion
-        </ViewToggleSegment>
-      </div>
+    <div>
+      <h1 className="font-serif text-[28px] font-medium tracking-[-0.01em]">Event plan</h1>
+      <p className="mt-1.5 text-[14px] text-ink-soft">
+        Occasion generated this plan from your requirements and keeps it in sync as agents complete
+        work.
+      </p>
     </div>
-  );
-}
-
-function ViewToggleSegment({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={`cursor-pointer rounded-full px-3.5 py-1.5 text-[12.5px] ${
-        active ? "bg-brand-soft font-semibold text-brand-deep" : "text-ink-soft hover:text-ink"
-      }`}
-    >
-      {children}
-    </button>
   );
 }
 

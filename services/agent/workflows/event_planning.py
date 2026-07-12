@@ -21,11 +21,11 @@ from typing import TYPE_CHECKING, Literal, TypeVar
 import httpx
 from pydantic import BaseModel, Field
 
-from agents.requirements_agent import EventRequirements
+from agents.requirements_agent import EventRequirements, merge_requirements, remember_requirements
 from core.orchestrator import Orchestrator, TaskRun
 from integrations.h_company.client import HClient, run_structured_completion
 from integrations.h_company.schemas import MODEL_DEEP, SessionResult
-from memory.event_memory import OPEN_QUESTIONS, PLAN_SNAPSHOT, REQUIREMENTS
+from memory.event_memory import PLAN_SNAPSHOT, REQUIREMENTS
 from memory.vector_store import event_scope
 from models.task import Task
 
@@ -109,6 +109,9 @@ class EventPlan(BaseModel):
     """The full event plan: the answer schema for the synthesis completion."""
 
     event_summary: str
+    event_date: str | None = Field(
+        None, description="The event's resolved calendar date as YYYY-MM-DD; null when genuinely unknown."
+    )
     timeline: list[PlanMilestone] = []
     budget: list[BudgetAllocation] = []
     total_budget_usd: float | None = None
@@ -145,6 +148,8 @@ requirements, produce the complete plan for delivering the event.
 
 Deliverables:
 - event_summary: the event in two sentences, including date, location, and headcount.
+- event_date: the event's calendar date as YYYY-MM-DD when it can be resolved (infer the
+  year the same way the timeline does); null when genuinely unknown.
 - timeline: dated milestones from today through post-event wrap-up.
 - budget: an allocation per spending category, with total_budget_usd as their sum.
 - checklist: every task someone must do, categorized and dated where possible.
@@ -192,7 +197,7 @@ class EventPlanningWorkflow:
         report.requirements = structured(requirements_run.result, EventRequirements)
         if report.requirements is None:
             return report  # nothing downstream is meaningful without requirements
-        self._remember_requirements(report.requirements, event_id=event_id, user_id=user_id)
+        report.requirements = self._remember_requirements(report.requirements, event_id=event_id, user_id=user_id)
 
         # A snapshot from a prior run lets a re-run skip the expensive synthesis completion.
         report.plan = self._recalled_plan(event_id)
@@ -235,15 +240,22 @@ class EventPlanningWorkflow:
         sections.extend(memory_sections(self._memory, brief, event_id=event_id, user_id=user_id))
         return await complete("\n\n".join(sections), PLAN_INSTRUCTIONS, EventPlan, http_client=self._http)
 
-    def _remember_requirements(self, requirements: EventRequirements, *, event_id: str, user_id: str | None) -> None:
-        """Accumulate this event's stated preferences and snapshot the requirements for resume."""
+    def _remember_requirements(
+        self, requirements: EventRequirements, *, event_id: str, user_id: str | None
+    ) -> EventRequirements:
+        """Merge with the stored brief, snapshot it, and accumulate preferences.
+
+        The kickoff re-extracts requirements from its own brief, which can drop facts the
+        intake already settled; merging keeps the snapshot cumulative. Returns what the
+        downstream stages should plan against.
+        """
         if self._memory is None:
-            return
-        self._memory.preferences.accumulate(requirements, user_id=user_id)
-        event_memory = self._memory.event(event_id)
-        event_memory.set(REQUIREMENTS, requirements.model_dump(mode="json"))
-        if requirements.open_questions:
-            event_memory.set(OPEN_QUESTIONS, requirements.open_questions)
+            return requirements
+        prior = self._memory.event(event_id).get(REQUIREMENTS)
+        if prior is not None:
+            requirements = merge_requirements(EventRequirements.model_validate(prior), requirements)
+        remember_requirements(self._memory, requirements, event_id=event_id, user_id=user_id)
+        return requirements
 
     def _recalled_plan(self, event_id: str) -> EventPlan | None:
         if self._memory is None:

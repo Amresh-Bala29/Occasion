@@ -20,10 +20,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-# Make the agent service root importable when pytest is run from anywhere.
+# The agent root (for `core`, `memory`, …) and the tests dir (to reuse test_memory's fake).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from agents.base_agent import BaseAgent  # noqa: E402
+from agents.base_agent import CONTEXT_HEADER, BaseAgent  # noqa: E402
 from core.config import settings  # noqa: E402
 from core.orchestrator import (  # noqa: E402
     BUILTIN_AGENTS,
@@ -34,9 +35,13 @@ from core.orchestrator import (  # noqa: E402
     WORKFLOWS,
     Orchestrator,
 )
+from core.state import Memory  # noqa: E402
 from integrations.h_company.client import HClient  # noqa: E402
 from integrations.h_company.schemas import DEFAULT_AGENT, MODEL_DEEP, MODEL_FAST  # noqa: E402
+from memory.event_memory import REQUIREMENTS  # noqa: E402
+from memory.vector_store import DECISION, event_scope  # noqa: E402
 from models.task import Task  # noqa: E402
+from test_memory import FakeMemoryRepository  # noqa: E402
 
 
 class FakeSDK:
@@ -207,6 +212,79 @@ def test_route_to_builtin_runs_managed_agent(monkeypatch) -> None:
     assert "overrides" in call  # which carries the signed-in browser overrides
     assert call["max_time_s"] == BUILTIN_MAX_TIME_S
     assert call["group_id"] == "evt-9"
+
+
+def _memory_with_context() -> Memory:
+    """A Memory whose evt-9 already holds a brief, a decision, and a matching research note."""
+    memory = Memory(FakeMemoryRepository())
+    memory.event("evt-9").set(REQUIREMENTS, {"event_type": "offsite", "headcount": 150, "open_questions": ["Theme?"]})
+    memory.semantic.add_document(
+        "Booked The Grand Hall (venue) for $7500", scope=event_scope("evt-9"), kind=DECISION, event_id="evt-9"
+    )
+    # The fake's search matches on substring, so the note repeats the task title below.
+    memory.semantic.add_document(
+        "Find a venue for 150 people: The Grand Hall and Riverside Loft both fit.",
+        scope=event_scope("evt-9", "venue"),
+        kind="research",
+        event_id="evt-9",
+    )
+    return memory
+
+
+def test_domain_dispatch_carries_stored_project_context(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(fake_result(status="idle", outcome="success", answer="found"))
+    task = make_task(assignee_agent="venue")
+
+    asyncio.run(Orchestrator(client=HClient(sdk), memory=_memory_with_context()).run_task(task))
+
+    (call,) = sdk.calls
+    prompt = call["messages"]
+    assert prompt.startswith("Find a venue for 150 people (event: evt-9)")
+    assert CONTEXT_HEADER in prompt
+    assert "- headcount: 150" in prompt
+    assert "Booked The Grand Hall (venue) for $7500" in prompt  # decisions ride unconditionally
+    assert "Riverside Loft" in prompt  # the query-matched research note
+    assert "Theme?" not in prompt  # interview state stays out of session prompts
+
+
+def test_builtin_dispatch_carries_stored_project_context(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(fake_result(status="idle", outcome="success", answer="browsed"))
+    task = make_task(assignee_agent="h/web-surfer-flash")
+
+    asyncio.run(Orchestrator(client=HClient(sdk), memory=_memory_with_context()).run_task(task))
+
+    (call,) = sdk.calls
+    assert call["agent"] == "h/web-surfer-flash"
+    assert CONTEXT_HEADER in call["messages"]
+    assert "Booked The Grand Hall (venue) for $7500" in call["messages"]
+
+
+def test_dispatch_without_memory_keeps_the_bare_prompt(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(fake_result(status="idle", outcome="success", answer="found"))
+    task = make_task(assignee_agent="venue")
+
+    asyncio.run(Orchestrator(client=HClient(sdk)).run_task(task))
+
+    (call,) = sdk.calls
+    assert call["messages"] == "Find a venue for 150 people (event: evt-9)"
+
+
+def test_requirements_dispatch_keeps_the_transcript_pure(monkeypatch) -> None:
+    """The extractor must read only what the client said — stored context would let
+    extraction echo memory back as if the client had stated it this turn."""
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    http, requests = completion_client({"open_questions": []})
+    task = make_task(title="Client: a 40-person offsite in SoMa", assignee_agent="requirements")
+
+    asyncio.run(Orchestrator(http_client=http, memory=_memory_with_context()).run_task(task))
+
+    (request,) = requests
+    transcript = json.loads(request.content)["messages"][1]["content"]
+    assert transcript.startswith("Client: a 40-person offsite in SoMa")
+    assert CONTEXT_HEADER not in transcript
 
 
 def test_unknown_routed_name_falls_back_to_default_agent(monkeypatch, caplog) -> None:

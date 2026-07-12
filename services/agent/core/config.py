@@ -16,9 +16,10 @@ class Settings:
     hai_api_key: str = os.getenv("HAI_API_KEY", "")
 
     # H exposes two API hosts: OpenAI-compatible completions on the Models API, and
-    # computer-use sessions on the AGP host. Leave the session base empty for the SDK's
-    # default region (EU, agp.eu.hcompany.ai) — where this account's sessions live.
-    # US escape hatch: https://agp.hcompany.ai
+    # computer-use sessions on the AGP host. HAI_SESSION_BASE_URL selects the session
+    # region: https://agp.hcompany.ai for US (North America), or empty to fall back to
+    # the SDK's default region (EU, agp.eu.hcompany.ai). A non-empty value is forwarded
+    # to the SDK's Client(base_url=...) verbatim, so this env var is the region switch.
     hai_models_base_url: str = os.getenv("HAI_MODELS_BASE_URL", "https://api.hcompany.ai/v1")
     hai_session_base_url: str = os.getenv("HAI_SESSION_BASE_URL", "")
 

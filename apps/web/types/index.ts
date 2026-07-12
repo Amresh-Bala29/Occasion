@@ -229,8 +229,8 @@ export interface Conversation {
   messages: InboxMessage[];
 }
 
-/** One turn in the Plan chat. Assistant turns that ran an agent task carry the run result. */
-export interface PlanChatMessage {
+/** One turn in the Occasion chat. Assistant turns that ran an agent task carry the run result. */
+export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
@@ -239,6 +239,9 @@ export interface PlanChatMessage {
   routedAgent?: string | null;
   routedReason?: string | null;
   isError?: boolean;
+  // Open questions a requirements turn asked; [] means that turn settled the
+  // interview complete. Also feeds the transcript rebuilt for the next turn.
+  questions?: string[];
 }
 
 // ---- Agent service (mirrors the agent's snake_case schemas: h_company, orchestrator,
@@ -289,12 +292,53 @@ export interface SessionQuota {
   available: number;
 }
 
+/** One web obstacle a session cleared — a rail-strip line. */
+export interface ObstacleLine {
+  session_id: string;
+  agent?: string | null; // H agent name, e.g. "occasion-venue"
+  kind: string; // "cookie" | "popup" | "scroll" | "recovery"
+  label: string; // e.g. "dismissed cookie wall on eventbrite.com"
+  at?: string | null;
+}
+
+/** Event-wide tally of cleared obstacles; resets with the agent service. */
+export interface ObstaclesSummary {
+  cleared_total: number;
+  lines: ObstacleLine[]; // newest first, capped
+}
+
 /** An event's live sessions plus quota; `succeeded` means the report is trustworthy. */
 export interface EventSessionsReport {
   succeeded: boolean;
   event_id: string;
   sessions: AgentSessionSummary[];
   quota?: SessionQuota | null;
+  obstacles?: ObstaclesSummary | null; // absent until any session cleared one
+  error?: string | null;
+}
+
+/** One session's live health — lifecycle state plus a step counter while it works. */
+export interface SessionHealth {
+  succeeded: boolean;
+  session_id: string;
+  status: string; // lifecycle state, or "error" when the check itself failed
+  outcome?: string | null;
+  steps?: number | null;
+  error?: string | null;
+  subagent_session_ids?: string[];
+}
+
+/** The newest browser screenshot of one live session; the live grid polls this. */
+export interface SessionFrame {
+  succeeded: boolean;
+  session_id: string;
+  at?: string | null; // when the observation was taken
+  page_title?: string | null;
+  page_url?: string | null;
+  media_type?: string | null; // e.g. "image/png"
+  image_base64?: string | null; // absent while the session has no screenshot yet
+  handling?: string | null; // obstacle underway now, e.g. "cookie wall" | "recovering"
+  obstacles_cleared?: string[]; // this session's cleared labels, oldest first
   error?: string | null;
 }
 

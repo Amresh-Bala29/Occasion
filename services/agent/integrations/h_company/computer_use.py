@@ -10,6 +10,10 @@ from core.config import settings
 from integrations.h_company.client import HClient
 from integrations.h_company.schemas import ComputerUseRequest, SessionResult
 
+# Client-side ceiling for one ad-hoc task (matches the orchestrator's built-in cap).
+# Without it a stuck session pins its worker thread indefinitely.
+MAX_TIME_S = 1200.0
+
 
 def run_browser_task(request: ComputerUseRequest, client: HClient | None = None) -> SessionResult:
     """Run one browser task through the managed H agent and return the outcome.
@@ -24,4 +28,4 @@ def run_browser_task(request: ComputerUseRequest, client: HClient | None = None)
             error="HAI_API_KEY is not configured; set it in services/agent/.env",
         )
     runner = client or HClient.from_settings()
-    return runner.run_task(task=request.task, agent=request.agent)
+    return runner.run_task(task=request.task, agent=request.agent, max_time_s=MAX_TIME_S)

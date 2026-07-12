@@ -10,8 +10,8 @@ export default async function ApprovalsPage() {
 
   return (
     <>
-      <Topbar section="Approvals" eventName={data.event.name} agentsWorking={data.agentsWorking} />
-      <ApprovalsPanel />
+      <Topbar section="Settings" eventName={data.event.name} agentsWorking={data.agentsWorking} />
+      <ApprovalsPanel event={data.event} />
     </>
   );
 }

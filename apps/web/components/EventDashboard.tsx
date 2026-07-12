@@ -33,12 +33,6 @@ export function EventDashboard({ data, vendors, deadlines }: EventDashboardProps
           <div className="flex items-center gap-2.5">
             <h2 className="text-[16px] font-semibold tracking-[-0.01em]">Waiting on you</h2>
             {approvals.length > 0 && <span className="chip chip-amber">{approvals.length} pending</span>}
-            <Link
-              href="/dashboard/approvals"
-              className="ml-auto text-[13px] font-semibold text-brand hover:underline"
-            >
-              Approval history
-            </Link>
           </div>
           {approvals.length > 0 ? (
             <div className="flex flex-col gap-3.5">

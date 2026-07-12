@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 import httpx
 from pydantic import BaseModel, Field
 
-from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent, with_project_context
 from agents.budget_agent import BudgetAgent
 from agents.catering_agent import CateringAgent
 from agents.decorations_agent import DecorationsAgent
@@ -156,6 +156,10 @@ class Orchestrator:
         self._client = client
         self._http = http_client
         self._memory = memory
+        # Observer for finished workflow stages (core/runs.py publishes them to the
+        # dashboard as they land). Assigned post-construction because the callback
+        # carries per-run state no orchestrator factory can know.
+        self.on_stage: Callable[[str, dict], None] | None = None
 
     async def run_task(self, task: str | Task) -> TaskRun:
         """Run one task on the best agent, recording a routed choice on the Task itself."""
@@ -260,6 +264,8 @@ class Orchestrator:
             client=self._client, http_client=self._http, memory=self._memory
         ).run(task.title, event_id=task.event_id, user_id=task.user_id)
         stages["planning"] = planning.model_dump(mode="json")
+        # Notified before the failure gate: a plan off a failed chain is still a plan.
+        self._notify_stage("planning", stages["planning"])
         if not planning.succeeded:
             return _stage_failure("planning", planning.plan_run or planning.requirements_run.result, stages)
         if name == "workflow/event_planning":
@@ -269,7 +275,13 @@ class Orchestrator:
             client=self._client, http_client=self._http, memory=self._memory
         ).run(planning.plan, event_id=task.event_id, requirements=planning.requirements, user_id=task.user_id)
         stages["sourcing"] = sourcing.model_dump(mode="json")
+        self._notify_stage("sourcing", stages["sourcing"])
         if not sourcing.succeeded:
+            if sourcing.shortlist is not None and not sourcing.shortlist.candidates:
+                # The synthesis run itself completed, so its status would read as a
+                # baffling "did not succeed: completed" — name the real problem.
+                empty = _error(f"shortlist came back empty; gaps: {len(sourcing.shortlist.gaps)}")
+                return _stage_failure("sourcing", empty, stages)
             return _stage_failure("sourcing", sourcing.shortlist_run, stages)
         if name == "workflow/vendor_sourcing":
             summary = (
@@ -291,6 +303,14 @@ class Orchestrator:
         )
         return _workflow_success(summary, stages)
 
+    def _notify_stage(self, stage: str, payload: dict) -> None:
+        if self.on_stage is None:
+            return
+        try:
+            self.on_stage(stage, payload)
+        except Exception:  # a publish hook must never fail the workflow it observes
+            logger.exception("on_stage hook failed for the %s stage", stage)
+
     async def _run_builtin(self, agent_id: str, task: str | Task) -> SessionResult:
         """Run the task on one of H's managed agents, bounded and grouped like domain runs.
 
@@ -299,10 +319,14 @@ class Orchestrator:
         """
         if not settings.hai_api_key:
             return _error("HAI_API_KEY is not configured; set it in services/agent/.env")
+        prompt = _task_text(task)
+        if isinstance(task, Task):
+            # Managed agents get the same stored project context domain agents do.
+            prompt = with_project_context(prompt, self._memory, task)
         client = self._client or HClient.from_settings()
         return await asyncio.to_thread(
             client.run_task,
-            _task_text(task),
+            prompt,
             agent_id,
             max_time_s=BUILTIN_MAX_TIME_S,
             group_id=task.event_id if isinstance(task, Task) else None,

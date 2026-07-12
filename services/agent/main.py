@@ -24,6 +24,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # the loop captured here.
     run_manager.bind(asyncio.get_running_loop())
     _sweep_stale_runs()
+    # The sweep marks dead-process runs interrupted; recovery then republishes what
+    # their finished H sessions and memory snapshots still hold.
+    run_manager.start_recovery()
     yield
     # Connections are validated per-checkout (pool_pre_ping); just tear the pool
     # down cleanly on shutdown.

@@ -11,7 +11,7 @@ export default async function PlanPage() {
   return (
     <>
       <Topbar section="Plan" eventName={data.event.name} agentsWorking={data.agentsWorking} />
-      <TaskBoard eventId={data.event.id} plan={plan} />
+      <TaskBoard plan={plan} />
     </>
   );
 }

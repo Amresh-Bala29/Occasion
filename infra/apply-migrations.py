@@ -1,7 +1,7 @@
 """Apply services/agent/database/migrations/*.sql to the configured database, in order.
 
 Applied filenames are recorded in a `schema_migrations` ledger the runner owns. A
-migration whose first created table already exists is recorded without running —
+migration whose created tables all already exist is recorded without running —
 "baselined" — which absorbs databases whose early migrations were applied by hand.
 Each migration runs inside its own transaction, so the DDL and its ledger row land
 (or fail) together.
@@ -37,9 +37,8 @@ create table if not exists schema_migrations (
 )"""
 
 
-def _first_created_table(sql: str) -> str | None:
-    match = re.search(r"create table (\w+)", sql, re.IGNORECASE)
-    return match.group(1) if match else None
+def _created_tables(sql: str) -> list[str]:
+    return re.findall(r"create table (\w+)", sql, re.IGNORECASE)
 
 
 def _is_applied(conn, filename: str) -> bool:
@@ -67,11 +66,13 @@ def main() -> None:
                 print(f"{path.name}: already applied")
                 continue
             sql = path.read_text()
-            table = _first_created_table(sql)
-            if table is not None and _table_exists(conn, table):
+            tables = _created_tables(sql)
+            # Baseline only when every created table exists: a migration mixing creates
+            # with alters must run when any part of it is missing.
+            if tables and all(_table_exists(conn, table) for table in tables):
                 # Applied by hand before the ledger existed; record it, don't re-run it.
                 _record(conn, path.name)
-                print(f"{path.name}: baselined ({table} already exists)")
+                print(f"{path.name}: baselined (tables already exist: {', '.join(tables)})")
                 continue
             # exec_driver_sql: multi-statement DDL needs the driver's simple query
             # protocol, and the file's `:` sequences must not parse as bind params.

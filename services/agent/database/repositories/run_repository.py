@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from pydantic import BaseModel
-from sqlalchemy import func, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from database import models as orm
@@ -71,6 +71,23 @@ class RunRepository:
     def get(self, run_id: str) -> RunRecord | None:
         row = self.db.get(orm.AgentRunRow, run_id)
         return _record(row) if row is not None else None
+
+    def list_for_event(self, event_id: str, *, kind: str | None = None, limit: int = 200) -> list[RunRecord]:
+        """This event's most recent runs, oldest first — the durable log a chat thread rebuilds from."""
+        stmt = select(orm.AgentRunRow).where(orm.AgentRunRow.event_id == event_id)
+        if kind is not None:
+            stmt = stmt.where(orm.AgentRunRow.kind == kind)
+        # The newest rows win the limit; reversing restores chronological order for the thread.
+        stmt = stmt.order_by(orm.AgentRunRow.created_at.desc()).limit(limit)
+        return [_record(row) for row in reversed(self.db.scalars(stmt).all())]
+
+    def list_interrupted(self, *, kind: str | None = None, limit: int = 100) -> list[RunRecord]:
+        """Runs a dead process stranded, oldest first — the boot reconciler's worklist."""
+        stmt = select(orm.AgentRunRow).where(orm.AgentRunRow.status == INTERRUPTED)
+        if kind is not None:
+            stmt = stmt.where(orm.AgentRunRow.kind == kind)
+        stmt = stmt.order_by(orm.AgentRunRow.created_at).limit(limit)
+        return [_record(row) for row in self.db.scalars(stmt).all()]
 
     def interrupt_stale(self) -> int:
         """Mark runs a dead process left `running` as interrupted; returns how many."""

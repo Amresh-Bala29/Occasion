@@ -41,11 +41,11 @@ def _settled() -> RunRecord:
 
 class FakeRunManager:
     def __init__(self) -> None:
-        self.chats: list[tuple[str, str | None]] = []
+        self.chats: list[tuple[str, str | None, str | None]] = []
         self.bookings: list[tuple[dict, str]] = []
 
-    def start_chat(self, message: str, event_id: str | None) -> RunRecord:
-        self.chats.append((message, event_id))
+    def start_chat(self, message: str, event_id: str | None, *, agent: str | None = None) -> RunRecord:
+        self.chats.append((message, event_id, agent))
         return _running(message, event_id)
 
     def start_booking(self, action: dict, *, approval_note: str) -> RunRecord:
@@ -58,9 +58,14 @@ class FakeRunManager:
 class FakeRunRepo:
     def __init__(self, record: RunRecord | None) -> None:
         self._record = record
+        self.listed: list[tuple[str, str | None]] = []
 
     def get(self, run_id: str) -> RunRecord | None:
         return self._record if self._record and run_id == self._record.id else None
+
+    def list_for_event(self, event_id: str, *, kind: str | None = None, limit: int = 200) -> list[RunRecord]:
+        self.listed.append((event_id, kind))
+        return [self._record] if self._record and self._record.event_id == event_id else []
 
 
 def _client(manager: FakeRunManager) -> TestClient:
@@ -81,7 +86,7 @@ def test_chat_starts_run_and_returns_running_record() -> None:
     manager = FakeRunManager()
     body = _client(manager).post("/chat", json={"message": "Find a venue", "event_id": EVENT_ID}).json()
 
-    assert manager.chats == [("Find a venue", EVENT_ID)]
+    assert manager.chats == [("Find a venue", EVENT_ID, None)]
     assert body["id"] == "run-abc123"
     assert body["status"] == "running"
     assert body["kind"] == "chat"
@@ -92,7 +97,16 @@ def test_plain_chat_passes_no_event() -> None:
     manager = FakeRunManager()
     _client(manager).post("/chat", json={"message": "What can you do?"})
 
-    assert manager.chats == [("What can you do?", None)]
+    assert manager.chats == [("What can you do?", None, None)]
+
+
+def test_chat_passes_pinned_agent() -> None:
+    manager = FakeRunManager()
+    _client(manager).post(
+        "/chat", json={"message": "Client: a 40-person offsite", "event_id": EVENT_ID, "agent": "requirements"}
+    )
+
+    assert manager.chats == [("Client: a 40-person offsite", EVENT_ID, "requirements")]
 
 
 def test_empty_message_is_422() -> None:
@@ -114,3 +128,18 @@ def test_get_run_returns_snake_case_settled_record() -> None:
 def test_get_missing_run_is_404() -> None:
     response = _polling_client(None).get("/runs/run-unknown")
     assert response.status_code == 404
+
+
+def test_list_runs_returns_the_event_thread() -> None:
+    repo = FakeRunRepo(_settled())
+    app.dependency_overrides[get_run_repository] = lambda: repo
+    body = TestClient(app).get("/runs", params={"event_id": EVENT_ID, "kind": "chat"}).json()
+
+    assert repo.listed == [(EVENT_ID, "chat")]
+    assert [run["id"] for run in body] == ["run-abc123"]
+    assert body[0]["result"]["answer"] == "ok"  # the reply a thread rebuild renders
+
+
+def test_list_runs_requires_event_id() -> None:
+    # No event_id must never dump the whole table.
+    assert _polling_client(_settled()).get("/runs").status_code == 422
