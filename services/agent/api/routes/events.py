@@ -9,7 +9,8 @@ calls in its threadpool. `response_model_exclude_none` keeps optional fields abs
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.dependencies import get_event_repository
+from api.dependencies import get_event_repository, get_supervisor
+from core.supervisor import EventSessionsReport, Supervisor
 from database.repositories.event_repository import EventRepository
 from models import web
 
@@ -111,3 +112,13 @@ def set_auto_approve_limit(
     if value is None:
         raise HTTPException(status_code=404, detail=f"Event {event_id!r} not found")
     return {"autoApproveLimit": value}
+
+
+@router.get("/{event_id}/agent-sessions", response_model=EventSessionsReport, response_model_exclude_none=True)
+def get_agent_sessions(event_id: str, supervisor: Supervisor = Depends(get_supervisor)) -> EventSessionsReport:
+    """Live H sessions for this event plus the account's session-slot quota.
+
+    Always 200 with an honest report: no live sessions is an empty list (group_id
+    scoping needs no DB), and a missing key or H failure is succeeded=False, not a raise.
+    """
+    return supervisor.event_sessions(event_id)

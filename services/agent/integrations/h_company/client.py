@@ -19,7 +19,6 @@ from integrations.h_company.session import browser_overrides
 _COMPLETED = "completed"
 _SUCCESS = "success"
 
-_MODELS_API_URL = "https://api.hcompany.ai/v1"
 _COMPLETION_TIMEOUT_S = 120.0
 
 
@@ -40,8 +39,8 @@ class HClient:
         from hai_agents import Client
 
         kwargs: dict[str, str] = {"api_key": settings.hai_api_key}
-        if settings.hai_base_url:
-            kwargs["base_url"] = settings.hai_base_url
+        if settings.hai_session_base_url:
+            kwargs["base_url"] = settings.hai_session_base_url
         return cls(Client(**kwargs))
 
     def run_task(
@@ -169,7 +168,7 @@ def run_structured_completion(
         "temperature": 0.2,
         "structured_outputs": {"json": schema.model_json_schema()},
     }
-    base_url = settings.hai_base_url.rstrip("/") or _MODELS_API_URL
+    base_url = settings.hai_models_base_url.rstrip("/")
     request = {
         "url": f"{base_url}/chat/completions",
         "headers": {"Authorization": f"Bearer {settings.hai_api_key}"},

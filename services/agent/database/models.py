@@ -14,6 +14,8 @@ rows get a synthetic integer key that never reaches the API. Every list carries 
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -273,3 +275,74 @@ class InboxMessage(Base):
     time: Mapped[str] = mapped_column("time_label", Text)
     body: Mapped[str] = mapped_column(Text)
     ordinal: Mapped[int] = mapped_column(Integer)
+
+
+# ---- Agent memory (backend-internal; not part of the events display aggregate) ----
+#
+# These back the agent fleet's memory rather than the dashboard, so they carry no
+# `ordinal`: order comes from relevance or identity, not a fixed display list. Cross-event
+# rows (preferences, vendor reputation) are not event-scoped; per-event working memory and
+# documents cascade off the event.
+
+
+class UserPreferenceRow(Base):
+    """One user's long-term preferences, accumulated across their events."""
+
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    dietary_restrictions: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    food_preferences: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    entertainment_preferences: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    accessibility_needs: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    priorities: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    preferred_vendors: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    blocked_vendors: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    branding_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class VendorReputationRow(Base):
+    """A vendor's reputation across every event we've used them on, keyed by a domain/name
+    slug — distinct from the per-event `vendors` display table above."""
+
+    __tablename__ = "vendor_reputation"
+
+    vendor_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    times_contacted: Mapped[int] = mapped_column(Integer, default=0)
+    times_quoted: Mapped[int] = mapped_column(Integer, default=0)
+    times_booked: Mapped[int] = mapped_column(Integer, default=0)
+    reliability_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quality_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    history: Mapped[list[dict]] = mapped_column(JSONB, default=list)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class EventMemoryRow(Base):
+    """One event's working memory as a key/value store; composite (event_id, key) primary key."""
+
+    __tablename__ = "event_memory"
+
+    event_id: Mapped[str] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), primary_key=True)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONB)
+
+
+class MemoryDocumentRow(Base):
+    """A free-text memory recalled via Postgres full-text search (see memory/vector_store.py).
+
+    The Python attribute is `meta`, not `metadata`: DeclarativeBase reserves that name. The
+    column stays `metadata`, renamed via the first positional arg like the reserved-word
+    columns above.
+    """
+
+    __tablename__ = "memory_documents"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(Text)
+    event_id: Mapped[str | None] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), nullable=True)
+    kind: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+    meta: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)

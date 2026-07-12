@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import threading
 import time
@@ -208,19 +209,22 @@ def test_route_to_builtin_runs_managed_agent(monkeypatch) -> None:
     assert call["group_id"] == "evt-9"
 
 
-def test_unknown_routed_name_falls_back_to_default_agent(monkeypatch) -> None:
+def test_unknown_routed_name_falls_back_to_default_agent(monkeypatch, caplog) -> None:
     monkeypatch.setattr(settings, "hai_api_key", "hk-test")
     sdk = FakeSDK(fake_result(status="idle", outcome="success", answer="handled"))
     http, _ = completion_client({"reason": "made up", "agent": "concierge"})
     task = make_task()
 
-    run = asyncio.run(Orchestrator(client=HClient(sdk), http_client=http).run_task(task))
+    with caplog.at_level(logging.WARNING, logger="core.orchestrator"):
+        run = asyncio.run(Orchestrator(client=HClient(sdk), http_client=http).run_task(task))
 
     assert run.agent == DEFAULT_AGENT
     assert "concierge" in run.reason
     assert task.assignee_agent == DEFAULT_AGENT
     (call,) = sdk.calls
     assert call["agent"] == DEFAULT_AGENT
+    # The fallback is also visible server-side, not only in the returned reason.
+    assert any("concierge" in message for message in caplog.messages)
 
 
 def test_near_miss_workflow_name_falls_back_to_default_agent(monkeypatch) -> None:

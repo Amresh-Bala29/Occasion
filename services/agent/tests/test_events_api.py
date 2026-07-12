@@ -7,13 +7,15 @@ JSON contract the web app depends on: camelCase keys and optional fields omitted
 """
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from api.dependencies import get_event_repository  # noqa: E402
+from api.dependencies import get_event_repository, get_supervisor  # noqa: E402
+from core.supervisor import EventSessionsReport, QuotaSnapshot, SessionSnapshot  # noqa: E402
 from main import app  # noqa: E402
 from models import web  # noqa: E402
 
@@ -135,3 +137,60 @@ def test_resolve_approval_returns_decision() -> None:
 def test_resolve_missing_approval_is_404() -> None:
     response = _client(FakeRepo(_dashboard())).post("/approvals/missing", json={"approved": False})
     assert response.status_code == 404
+
+
+class FakeSupervisor:
+    def __init__(self, report: EventSessionsReport) -> None:
+        self._report = report
+
+    def event_sessions(self, event_id: str) -> EventSessionsReport:
+        return self._report
+
+
+def _supervisor_client(report: EventSessionsReport) -> TestClient:
+    app.dependency_overrides[get_supervisor] = lambda: FakeSupervisor(report)
+    return TestClient(app)
+
+
+def test_agent_sessions_returns_live_report() -> None:
+    report = EventSessionsReport(
+        succeeded=True,
+        event_id=EVENT_ID,
+        sessions=[
+            SessionSnapshot(
+                id="sess_1",
+                agent="occasion-venue",
+                status="running",
+                task="Research three venues",
+                agent_view_url="https://platform.hcompany.ai/agents/sessions/sess_1",
+                created_at=datetime(2026, 7, 11, 20, 0, tzinfo=timezone.utc),
+            )
+        ],
+        quota=QuotaSnapshot(limit=3, active=1, available=2),
+    )
+    body = _supervisor_client(report).get(f"/events/{EVENT_ID}/agent-sessions").json()
+
+    # snake_case keys: this is the live-surface contract, like SessionResult — not a
+    # models/web.py mirror of the TS mocks.
+    assert body["succeeded"] is True
+    assert body["event_id"] == EVENT_ID
+    (session,) = body["sessions"]
+    assert session["id"] == "sess_1"
+    assert session["agent"] == "occasion-venue"
+    assert session["status"] == "running"
+    assert session["task"] == "Research three venues"
+    assert session["agent_view_url"].endswith("sess_1")
+    assert "finished_at" not in session  # absent optionals omitted, not null
+    assert body["quota"] == {"limit": 3, "active": 1, "available": 2}
+    assert "error" not in body
+
+
+def test_agent_sessions_failure_is_200_with_honest_error() -> None:
+    report = EventSessionsReport(succeeded=False, event_id=EVENT_ID, error="quota check failed: HTTP 503: down")
+    response = _supervisor_client(report).get(f"/events/{EVENT_ID}/agent-sessions")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["succeeded"] is False
+    assert "503" in body["error"]
+    assert body["sessions"] == []

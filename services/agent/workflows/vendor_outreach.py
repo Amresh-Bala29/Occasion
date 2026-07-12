@@ -21,15 +21,22 @@ VendorSourcingWorkflow.book's approval gate.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import httpx
 from pydantic import BaseModel, Field
 
 from core.orchestrator import Orchestrator, TaskRun
 from integrations.h_company.client import HClient
 from integrations.h_company.schemas import DEFAULT_AGENT, SessionResult
+from memory.vector_store import vendor_scope
+from memory.vendor_memory import vendor_key_for
 from models.task import Task
 from workflows.event_planning import EventPlan, complete, slug, structured
 from workflows.vendor_sourcing import VendorCandidate, VendorShortlist
+
+if TYPE_CHECKING:
+    from core.state import Memory
 
 
 class OutreachDraft(BaseModel):
@@ -164,8 +171,15 @@ class VendorOutreachWorkflow:
     comparison as explicit gaps. Nothing raises on agent failure.
     """
 
-    def __init__(self, client: HClient | None = None, http_client: httpx.Client | None = None) -> None:
-        self._orchestrator = Orchestrator(client=client, http_client=http_client)
+    def __init__(
+        self,
+        client: HClient | None = None,
+        http_client: httpx.Client | None = None,
+        *,
+        memory: Memory | None = None,
+    ) -> None:
+        self._orchestrator = Orchestrator(client=client, http_client=http_client, memory=memory)
+        self._memory = memory
         self._http = http_client
 
     async def run(
@@ -185,8 +199,11 @@ class VendorOutreachWorkflow:
         report.drafts_run, report.drafts = await self._draft(candidates, context)
         report.send_tasks = self._send_tasks(candidates, report.drafts, event_id)
         report.send_runs = await self._orchestrator.run_tasks(report.send_tasks)
+        self._remember_contacts(candidates, report.send_runs, event_id)
         report.comparison_run = await self._compare(candidates, report.drafts, report.send_runs, prior=None)
         report.comparison = structured(report.comparison_run, QuoteComparison)
+        if report.comparison is not None:
+            self._remember_quotes(report.comparison, candidates, event_id)
         # Outreach that reached nobody accomplished nothing, however tidy the report.
         report.succeeded = report.comparison is not None and any(run.result.succeeded for run in report.send_runs)
         return report
@@ -364,6 +381,33 @@ class VendorOutreachWorkflow:
             if not run.result.succeeded
         )
         return [candidate for candidate in report.candidates if candidate.name in names]
+
+    def _remember_contacts(self, candidates: list[VendorCandidate], runs: list[TaskRun], event_id: str) -> None:
+        """Record a contact for each vendor we reached, and file the send report as a
+        vendor-scoped transcript for later recall."""
+        if self._memory is None:
+            return
+        for candidate, run in zip(candidates, runs):
+            if not run.result.succeeded:
+                continue
+            self._memory.vendors.record_contacted(candidate, event_id=event_id)
+            if run.result.answer:
+                self._memory.semantic.add_document(
+                    run.result.answer,
+                    scope=vendor_scope(vendor_key_for(candidate.name, candidate.url)),
+                    kind="transcript",
+                    event_id=event_id,
+                )
+
+    def _remember_quotes(self, comparison: QuoteComparison, candidates: list[VendorCandidate], event_id: str) -> None:
+        """Record a quote for each vendor that returned a real number."""
+        if self._memory is None:
+            return
+        by_name = {candidate.name: candidate for candidate in candidates}
+        for quote in comparison.quotes:
+            candidate = by_name.get(quote.vendor_name)
+            if candidate is not None and quote.quoted_total_usd is not None:
+                self._memory.vendors.record_quoted(candidate, total_usd=quote.quoted_total_usd, event_id=event_id)
 
 
 def _event_context(plan: EventPlan | None) -> str:

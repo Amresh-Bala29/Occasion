@@ -1,6 +1,0 @@
-# Egress network policy for the browser runtime.
-default: deny
-allow:
-  - domains_from: permissions.yaml
-rate_limits:
-  requests_per_minute: 120
