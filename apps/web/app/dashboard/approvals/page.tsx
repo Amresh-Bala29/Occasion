@@ -1,9 +1,12 @@
+import { cookies } from "next/headers";
+
 import { ApprovalsPanel } from "@/components/ApprovalsPanel";
 import { Topbar } from "@/components/Topbar";
-import { getDashboardData } from "@/lib/api";
+import { DEFAULT_EVENT_ID, EVENT_COOKIE, getDashboardData } from "@/lib/api";
 
 export default async function ApprovalsPage() {
-  const data = await getDashboardData();
+  const eventId = (await cookies()).get(EVENT_COOKIE)?.value ?? DEFAULT_EVENT_ID;
+  const data = await getDashboardData(eventId);
 
   return (
     <>

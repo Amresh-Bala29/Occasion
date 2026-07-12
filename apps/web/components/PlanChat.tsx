@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
-import { runComputerUseTask } from "@/lib/api";
-import type { PlanChatMessage, SessionResult } from "@/types";
+import { awaitRun, sendChatMessage } from "@/lib/api";
+import type { AgentRunRecord, PlanChatMessage } from "@/types";
 
 interface PlanChatProps {
   eventId: string;
@@ -19,6 +19,7 @@ const SUGGESTIONS = [
  * result lands back in the thread. History persists locally per event. */
 export function PlanChat({ eventId }: PlanChatProps) {
   const storageKey = `occasion:plan-chat:${eventId}`;
+  const pendingKey = `occasion:plan-chat-pending:${eventId}`;
   const [messages, setMessages] = useState<PlanChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
@@ -37,6 +38,23 @@ export function PlanChat({ eventId }: PlanChatProps) {
     }
     setHydrated(true);
   }, [storageKey]);
+
+  // A turn interrupted by a reload keeps running server-side; pick its poll back up.
+  useEffect(() => {
+    const pendingRunId = window.localStorage.getItem(pendingKey);
+    if (!pendingRunId) return;
+    setPending(true);
+    awaitRun(pendingRunId)
+      .then((run) => setMessages((prev) => [...prev, resultMessage(run)]))
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setMessages((prev) => [...prev, { ...newMessage("assistant", message), isError: true }]);
+      })
+      .finally(() => {
+        window.localStorage.removeItem(pendingKey);
+        setPending(false);
+      });
+  }, [pendingKey]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -60,12 +78,16 @@ export function PlanChat({ eventId }: PlanChatProps) {
     setMessages((prev) => [...prev, newMessage("user", prompt)]);
     setPending(true);
     try {
-      const result = await runComputerUseTask(prompt);
-      setMessages((prev) => [...prev, resultMessage(result)]);
+      const started = await sendChatMessage(prompt, eventId);
+      // Remember the in-flight run so a reload resumes the poll instead of losing it.
+      window.localStorage.setItem(pendingKey, started.id);
+      const settled = await awaitRun(started.id);
+      setMessages((prev) => [...prev, resultMessage(settled)]);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setMessages((prev) => [...prev, { ...newMessage("assistant", message), isError: true }]);
     } finally {
+      window.localStorage.removeItem(pendingKey);
       setPending(false);
     }
   }
@@ -166,9 +188,21 @@ function newMessage(role: PlanChatMessage["role"], content: string): PlanChatMes
   return { id: crypto.randomUUID(), role, content, createdAt: new Date().toISOString() };
 }
 
-function resultMessage(result: SessionResult): PlanChatMessage {
-  const content = result.answer ?? result.error ?? "The session finished without an answer.";
-  return { ...newMessage("assistant", content), result, isError: !result.succeeded };
+function resultMessage(run: AgentRunRecord): PlanChatMessage {
+  const result = run.result ?? undefined;
+  const content =
+    result?.answer ??
+    result?.error ??
+    (run.status === "interrupted"
+      ? "This run was interrupted by a service restart."
+      : "The run finished without an answer.");
+  return {
+    ...newMessage("assistant", content),
+    result,
+    routedAgent: run.agent,
+    routedReason: run.reason,
+    isError: !(result?.succeeded ?? false),
+  };
 }
 
 function EmptyState({ onPick }: { onPick: (suggestion: string) => void }) {
@@ -216,6 +250,12 @@ function AssistantBubble({ message }: { message: PlanChatMessage }) {
     <div className="flex gap-2.5">
       <AssistantAvatar />
       <div className={`min-w-0 max-w-[92%] rounded-2xl rounded-bl-[6px] border px-4 py-3 shadow-card ${bubbleClasses}`}>
+        {message.routedAgent && (
+          <p className="mb-1.5 text-[11.5px] font-medium text-ink-faint">
+            Routed to {message.routedAgent}
+            {message.routedReason ? ` — ${message.routedReason}` : ""}
+          </p>
+        )}
         {result && (
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <span className="chip chip-gray">{result.status}</span>
@@ -253,8 +293,8 @@ function PendingBubble() {
           aria-hidden="true"
         />
         <p className="text-[13px] leading-relaxed text-ink-soft">
-          Working on it — running a managed browser session. This can take a few minutes; keep this
-          page open.
+          Working on it — routing to the right agent; browser tasks can take a few minutes. Keep
+          this page open.
         </p>
       </div>
     </div>

@@ -1,22 +1,28 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
-import { runComputerUseTask } from "@/lib/api";
-import type { SessionResult } from "@/types";
+import { VoiceAssistant } from "@/components/VoiceAssistant";
+import { useEvent } from "@/hooks/useEvent";
+import { awaitRun, sendChatMessage, speak } from "@/lib/api";
+import type { AgentRunRecord } from "@/types";
 
 type Phase = "idle" | "running" | "done" | "error";
 
 const TASK_PLACEHOLDER =
   "e.g. Find three caterers near Pier 27 in San Francisco that can plate dinner for 320 guests on Aug 6, and list per-person pricing.";
 
-/** Header button that opens a dialog for running one computer-use task end to end. */
+/** Header button that opens a dialog for running one orchestrated agent turn end to end. */
 export function TalkToOccasion() {
+  const { eventId } = useEvent();
   const [open, setOpen] = useState(false);
   const [task, setTask] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
-  const [result, setResult] = useState<SessionResult | null>(null);
+  const [run, setRun] = useState<AgentRunRecord | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
+  // A turn that arrived by voice gets its answer read back; typed turns stay silent.
+  const [voiceTurn, setVoiceTurn] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -27,25 +33,58 @@ export function TalkToOccasion() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [open]);
 
+  // Read-alouds stop the moment the dialog closes, and on unmount.
+  useEffect(() => {
+    if (!open) stopAudio(audioRef);
+  }, [open]);
+  useEffect(() => () => stopAudio(audioRef), []);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = task.trim();
     if (!trimmed || phase === "running") return;
+    const spokenTurn = voiceTurn;
+    setVoiceTurn(false);
     setPhase("running");
-    setResult(null);
+    setRun(null);
     setErrorMessage("");
     try {
-      setResult(await runComputerUseTask(trimmed));
+      // The run starts immediately and executes in the background; poll it home.
+      const started = await sendChatMessage(trimmed, eventId);
+      const settled = await awaitRun(started.id);
+      setRun(settled);
       setPhase("done");
+      if (spokenTurn && settled.result?.answer) void playAnswer(settled.result.answer);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
       setPhase("error");
     }
   }
 
+  async function playAnswer(text: string) {
+    try {
+      const clip = await speak(text);
+      stopAudio(audioRef);
+      const audio = new Audio(URL.createObjectURL(clip));
+      audioRef.current = audio;
+      audio.onended = () => {
+        URL.revokeObjectURL(audio.src);
+        if (audioRef.current === audio) audioRef.current = null;
+      };
+      await audio.play();
+    } catch {
+      // The answer is on screen; a failed read-aloud isn't worth surfacing.
+    }
+  }
+
+  function handleTranscript(text: string) {
+    setTask((current) => (current.trim() ? `${current.trimEnd()} ${text}` : text));
+    setVoiceTurn(true);
+  }
+
   function resetToForm() {
     setPhase("idle");
-    setResult(null);
+    setRun(null);
     setErrorMessage("");
   }
 
@@ -88,7 +127,7 @@ export function TalkToOccasion() {
                   Talk to Occasion
                 </h2>
                 <p className="mt-1 text-[13px] text-ink-soft">
-                  Give Occasion a research task to run on real websites.
+                  Ask Occasion anything about the event, or give it a task to run on real websites.
                 </p>
               </div>
               <button
@@ -107,12 +146,13 @@ export function TalkToOccasion() {
                   task={task}
                   errorMessage={phase === "error" ? errorMessage : ""}
                   onTaskChange={setTask}
+                  onTranscript={handleTranscript}
                   onSubmit={handleSubmit}
                 />
               )}
               {phase === "running" && <RunningStatus task={task} />}
-              {phase === "done" && result && (
-                <RunResult result={result} onRunAnother={resetToForm} onClose={() => setOpen(false)} />
+              {phase === "done" && run && (
+                <RunResult run={run} onRunAnother={resetToForm} onClose={() => setOpen(false)} />
               )}
             </div>
           </div>
@@ -126,15 +166,16 @@ interface TaskFormProps {
   task: string;
   errorMessage: string;
   onTaskChange: (task: string) => void;
+  onTranscript: (text: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }
 
-function TaskForm({ task, errorMessage, onTaskChange, onSubmit }: TaskFormProps) {
+function TaskForm({ task, errorMessage, onTaskChange, onTranscript, onSubmit }: TaskFormProps) {
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-3.5">
       {errorMessage && <ErrorBanner message={errorMessage} />}
       <label className="text-[13px] font-semibold" htmlFor="occasion-task">
-        What should Occasion research?
+        What should Occasion work on?
       </label>
       <textarea
         id="occasion-task"
@@ -145,10 +186,12 @@ function TaskForm({ task, errorMessage, onTaskChange, onSubmit }: TaskFormProps)
         autoFocus
       />
       <p className="text-[12px] leading-normal text-ink-faint">
-        Occasion runs this in a managed browser session and reports back with an answer plus a
-        replayable agent view. Nothing is booked or purchased without your approval.
+        Occasion routes this to the right agent, which may work in a managed browser session and
+        reports back with an answer plus a replayable agent view. Nothing is booked or purchased
+        without your approval.
       </p>
       <div className="flex items-center justify-end gap-2.5">
+        <VoiceAssistant onTranscript={onTranscript} />
         <button type="submit" className="btn btn-primary" disabled={!task.trim()}>
           Run task
         </button>
@@ -170,8 +213,8 @@ function RunningStatus({ task }: { task: string }) {
       <div>
         <p className="text-[13.5px] font-semibold">Occasion is working on it…</p>
         <p className="mt-0.5 text-[12.5px] text-ink-soft">
-          Running “{truncate(task.trim())}” in a managed browser session. This can take a few
-          minutes — leave this open or check back.
+          Working on “{truncate(task.trim())}”. Occasion routes this to the right agent and may
+          drive a managed browser session — this can take a few minutes.
         </p>
       </div>
     </div>
@@ -179,21 +222,30 @@ function RunningStatus({ task }: { task: string }) {
 }
 
 interface RunResultProps {
-  result: SessionResult;
+  run: AgentRunRecord;
   onRunAnother: () => void;
   onClose: () => void;
 }
 
-function RunResult({ result, onRunAnother, onClose }: RunResultProps) {
+function RunResult({ run, onRunAnother, onClose }: RunResultProps) {
+  const result = run.result ?? null;
   return (
     <>
-      {!result.succeeded && (
-        <ErrorBanner message={result.error ?? "The session finished without a successful outcome."} />
+      {!result?.succeeded && (
+        <ErrorBanner
+          message={result?.error ?? "This run was interrupted before it could finish."}
+        />
+      )}
+      {run.agent && (
+        <p className="text-[12.5px] leading-normal text-ink-soft">
+          Routed to <span className="font-semibold">{run.agent}</span>
+          {run.reason ? ` — ${run.reason}` : ""}
+        </p>
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <span className="chip chip-gray">{result.status}</span>
-        {result.outcome && <span className={outcomeChipClass(result.outcome)}>{result.outcome}</span>}
-        {result.agent_view_url && (
+        <span className="chip chip-gray">{result?.status ?? run.status}</span>
+        {result?.outcome && <span className={outcomeChipClass(result.outcome)}>{result.outcome}</span>}
+        {result?.agent_view_url && (
           <a
             className="ml-auto text-[13px] font-semibold whitespace-nowrap text-brand hover:underline"
             href={result.agent_view_url}
@@ -204,7 +256,7 @@ function RunResult({ result, onRunAnother, onClose }: RunResultProps) {
           </a>
         )}
       </div>
-      {result.answer && (
+      {result?.answer && (
         <>
           <span className="eyebrow">Answer</span>
           <div className="max-h-[300px] overflow-y-auto rounded-[10px] border border-line bg-[#f7f9fd] px-[15px] py-[13px] text-[13.5px] leading-[1.6] break-words whitespace-pre-wrap">
@@ -212,7 +264,7 @@ function RunResult({ result, onRunAnother, onClose }: RunResultProps) {
           </div>
         </>
       )}
-      {result.session_id && (
+      {result?.session_id && (
         <p className="font-mono text-[11px] text-ink-faint [overflow-wrap:anywhere]">
           Session {result.session_id}
         </p>
@@ -245,4 +297,12 @@ function outcomeChipClass(outcome: string): string {
 
 function truncate(text: string, max = 90): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function stopAudio(ref: { current: HTMLAudioElement | null }) {
+  const audio = ref.current;
+  if (!audio) return;
+  audio.pause();
+  URL.revokeObjectURL(audio.src);
+  ref.current = null;
 }

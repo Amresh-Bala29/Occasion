@@ -14,8 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from api.dependencies import get_event_repository, get_supervisor  # noqa: E402
+from api.dependencies import get_event_repository, get_run_manager, get_supervisor  # noqa: E402
 from core.supervisor import EventSessionsReport, QuotaSnapshot, SessionSnapshot  # noqa: E402
+from database.repositories.run_repository import RunRecord  # noqa: E402
 from main import app  # noqa: E402
 from models import web  # noqa: E402
 
@@ -60,9 +61,29 @@ def _dashboard() -> web.DashboardData:
 class FakeRepo:
     def __init__(self, dashboard: web.DashboardData | None) -> None:
         self._dashboard = dashboard
+        self.created: dict[str, str] | None = None
 
     def get_dashboard(self, event_id: str) -> web.DashboardData | None:
         return self._dashboard if event_id == EVENT_ID else None
+
+    def list_events(self) -> list[web.EventOverview]:
+        return [self._dashboard.event] if self._dashboard else []
+
+    def create_event(self, *, name: str, kind: str, date: str, location: str, headcount: str) -> web.EventOverview:
+        self.created = {"name": name, "kind": kind, "date": date, "location": location, "headcount": headcount}
+        return web.EventOverview(
+            id="test-offsite", kind=kind, name=name, short_name=name, status_label="Planning",
+            date=date, location=location, headcount=headcount, days_to_go="TBD", percent_complete=0,
+        )
+
+    def list_pending_approvals(self) -> list[web.PendingApproval]:
+        return [
+            web.PendingApproval(
+                id="approval-2", kind="Booking", agent="Entertainment agent", agent_tone="green",
+                tag="Deposit", title="DJ", description="d", amount="$3,200", vendor="Marina Sound",
+                event_id=EVENT_ID, event_name="NovaFlow Summit 2026",
+            )
+        ]
 
     def get_budget(self, event_id: str) -> web.BudgetDetail:
         return web.BudgetDetail(
@@ -80,6 +101,25 @@ class FakeRepo:
         return web.DecisionRecord(
             id=f"decision-{approval_id}", title="Totes", amount="$2,940", when="just now", approved=approved
         )
+
+    # ---- Booking-loop surface (ApprovalManager reads policy through these) ----
+
+    def get_auto_approve_limit(self, event_id: str) -> str | None:
+        return "$500"
+
+    def get_spending_rules(self, event_id: str) -> list[web.SpendingRule]:
+        return [web.SpendingRule(id="rule-deposits", label="Deposits & payments", value="Auto")]
+
+    def create_approval(self, **kwargs) -> web.ApprovalItem:
+        self.created_approval = kwargs
+        return web.ApprovalItem(
+            id="approval-book-1", kind=kwargs["kind"], agent=kwargs["agent"], agent_tone=kwargs["agent_tone"],
+            tag=kwargs["tag"], title=kwargs["title"], description=kwargs["description"],
+            amount=kwargs["amount"], vendor=kwargs["vendor"],
+        )
+
+    def get_approval_action(self, approval_id: str) -> dict | None:
+        return getattr(self, "created_approval", {}).get("action") if approval_id == "approval-book-1" else None
 
 
 def _client(repo: FakeRepo) -> TestClient:
@@ -137,6 +177,117 @@ def test_resolve_approval_returns_decision() -> None:
 def test_resolve_missing_approval_is_404() -> None:
     response = _client(FakeRepo(_dashboard())).post("/approvals/missing", json={"approved": False})
     assert response.status_code == 404
+
+
+def test_list_events_returns_camelcase_summaries() -> None:
+    body = _client(FakeRepo(_dashboard())).get("/events").json()
+
+    (event,) = body
+    assert event["id"] == EVENT_ID
+    assert event["shortName"] == "NovaFlow Summit"
+    assert event["percentComplete"] == 68
+
+
+def test_create_event_returns_created_summary() -> None:
+    repo = FakeRepo(_dashboard())
+    body = _client(repo).post("/events", json={"name": "Test Offsite"}).json()
+
+    # Body defaults reach the repository; the response is the created summary.
+    assert repo.created == {"name": "Test Offsite", "kind": "Event", "date": "TBD", "location": "TBD", "headcount": "TBD"}
+    assert body["id"] == "test-offsite"
+    assert body["statusLabel"] == "Planning"
+    assert body["percentComplete"] == 0
+
+
+def test_list_approvals_returns_pending_across_events() -> None:
+    body = _client(FakeRepo(_dashboard())).get("/approvals").json()
+
+    (approval,) = body
+    assert approval["eventId"] == EVENT_ID
+    assert approval["eventName"] == "NovaFlow Summit 2026"
+    assert approval["agentTone"] == "green"
+    assert "threadId" not in approval  # absent optionals omitted, not null
+
+
+class FakeRunManager:
+    def __init__(self) -> None:
+        self.bookings: list[tuple[dict, str]] = []
+
+    def start_booking(self, action: dict, *, approval_note: str) -> RunRecord:
+        self.bookings.append((action, approval_note))
+        return RunRecord(
+            id="run-book1", event_id=action.get("event_id"), kind="booking", title="Book", status="running"
+        )
+
+
+def _booking_client(repo: FakeRepo, manager: FakeRunManager) -> TestClient:
+    app.dependency_overrides[get_event_repository] = lambda: repo
+    app.dependency_overrides[get_run_manager] = lambda: manager
+    return TestClient(app)
+
+
+def test_booking_under_limit_executes_immediately() -> None:
+    manager = FakeRunManager()
+    body = _booking_client(FakeRepo(_dashboard()), manager).post(
+        f"/events/{EVENT_ID}/bookings",
+        json={"vendor_name": "Marina Sound", "url": "https://marinasound.example", "category": "entertainment",
+              "amount_usd": 240.0},
+    ).json()
+
+    assert body["status"] == "executing"
+    assert body["run_id"] == "run-book1"
+    ((action, note),) = manager.bookings
+    assert action["candidate"]["name"] == "Marina Sound"
+    assert action["event_id"] == EVENT_ID
+    assert note.startswith("Auto-approved")
+
+
+def test_booking_over_limit_parks_as_approval_with_action() -> None:
+    repo = FakeRepo(_dashboard())
+    manager = FakeRunManager()
+    body = _booking_client(repo, manager).post(
+        f"/events/{EVENT_ID}/bookings",
+        json={"vendor_name": "Pier 27", "url": "https://pier27.example", "category": "venue",
+              "amount_usd": 12_000.0},
+    ).json()
+
+    assert body["status"] == "pending_approval"
+    assert body["approval_id"] == "approval-book-1"
+    assert manager.bookings == []  # nothing executes until the user approves
+    assert repo.created_approval["action"]["candidate"]["url"] == "https://pier27.example"
+
+
+def test_approving_an_actionable_approval_executes_it() -> None:
+    repo = FakeRepo(_dashboard())
+    manager = FakeRunManager()
+    client = _booking_client(repo, manager)
+    client.post(
+        f"/events/{EVENT_ID}/bookings",
+        json={"vendor_name": "Pier 27", "url": "https://pier27.example", "category": "venue",
+              "amount_usd": 12_000.0},
+    )
+
+    response = client.post("/approvals/approval-book-1", json={"approved": True})
+
+    assert response.status_code == 200  # decision shape unchanged for the dashboard
+    ((action, note),) = manager.bookings
+    assert action["candidate"]["name"] == "Pier 27"
+    assert "decision-approval-book-1" in note
+
+
+def test_declining_an_actionable_approval_executes_nothing() -> None:
+    repo = FakeRepo(_dashboard())
+    manager = FakeRunManager()
+    client = _booking_client(repo, manager)
+    client.post(
+        f"/events/{EVENT_ID}/bookings",
+        json={"vendor_name": "Pier 27", "url": "https://pier27.example", "category": "venue",
+              "amount_usd": 12_000.0},
+    )
+
+    client.post("/approvals/approval-book-1", json={"approved": False})
+
+    assert manager.bookings == []
 
 
 class FakeSupervisor:

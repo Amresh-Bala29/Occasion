@@ -1,9 +1,12 @@
+import { cookies } from "next/headers";
+
 import { TaskBoard } from "@/components/TaskBoard";
 import { Topbar } from "@/components/Topbar";
-import { getDashboardData, getEventPlan } from "@/lib/api";
+import { DEFAULT_EVENT_ID, EVENT_COOKIE, getDashboardData, getEventPlan } from "@/lib/api";
 
 export default async function PlanPage() {
-  const [data, plan] = await Promise.all([getDashboardData(), getEventPlan()]);
+  const eventId = (await cookies()).get(EVENT_COOKIE)?.value ?? DEFAULT_EVENT_ID;
+  const [data, plan] = await Promise.all([getDashboardData(eventId), getEventPlan(eventId)]);
 
   return (
     <>

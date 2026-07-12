@@ -40,6 +40,28 @@ class EventRepository:
 
     # ---- Reads ----
 
+    def list_events(self) -> list[web.EventOverview]:
+        rows = self.db.scalars(select(orm.Event).order_by(orm.Event.name)).all()
+        return [web.EventOverview.model_validate(event) for event in rows]
+
+    def list_pending_approvals(self) -> list[web.PendingApproval]:
+        # Ordinals are per-event (new rows lead at min-1), so the compound order here
+        # is deterministic within each event; _ordered can't express the join.
+        stmt = (
+            select(orm.Approval, orm.Event.name)
+            .join(orm.Event, orm.Event.id == orm.Approval.event_id)
+            .where(orm.Approval.resolved.is_(False))
+            .order_by(orm.Approval.event_id, orm.Approval.ordinal)
+        )
+        return [
+            web.PendingApproval(
+                **web.ApprovalItem.model_validate(approval).model_dump(),
+                event_id=approval.event_id,
+                event_name=event_name,
+            )
+            for approval, event_name in self.db.execute(stmt).all()
+        ]
+
     def get_dashboard(self, event_id: str) -> web.DashboardData | None:
         event = self.db.get(orm.Event, event_id)
         if event is None:
@@ -171,7 +193,53 @@ class EventRepository:
         )
         return [web.ActivityItem.model_validate(a) for a in rows]
 
+    def get_activity(self, event_id: str) -> list[web.ActivityItem]:
+        rows = self._ordered(
+            orm.ActivityItem, orm.ActivityItem.event_id == event_id, orm.ActivityItem.pool.is_(False)
+        )
+        return [web.ActivityItem.model_validate(a) for a in rows]
+
+    def get_approval_action(self, approval_id: str) -> dict | None:
+        """The machine-readable action a still-pending approval authorizes, if any."""
+        approval = self.db.get(orm.Approval, approval_id)
+        if approval is None or approval.resolved:
+            return None
+        return approval.action
+
     # ---- Writes ----
+
+    def create_event(self, *, name: str, kind: str, date: str, location: str, headcount: str) -> web.EventOverview:
+        """Create a bare event the agents can plan into; display fields start neutral.
+
+        Slugs stay pretty because frontend routes key on them; a name collision gets
+        the same uuid suffix idiom create_approval uses.
+        """
+        event_id = _slugify(name)
+        if self.db.get(orm.Event, event_id) is not None:
+            event_id = f"{event_id}-{uuid4().hex[:6]}"
+        event = orm.Event(
+            id=event_id,
+            kind=kind,
+            name=name,
+            short_name=name,
+            status_label="Planning",
+            date=date,
+            location=location,
+            headcount=headcount,
+            days_to_go="TBD",
+            percent_complete=0,
+            total_usd=0,
+            paid_usd=0,
+            pending_usd=0,
+            vendors_confirmed=0,
+            vendors_total=0,
+            vendors_in_progress=0,
+            auto_approve_limit="$500",  # the seed's default; the approvals UI can change it
+            savings_footnote="",
+        )
+        self.db.add(event)
+        self.db.commit()
+        return web.EventOverview.model_validate(event)
 
     def save_plan(
         self,
@@ -246,6 +314,7 @@ class EventRepository:
         amount: str,
         vendor: str,
         thread_id: str | None = None,
+        action: dict | None = None,
     ) -> web.ApprovalItem:
         # New row leads the pending list; a matching feed line mirrors resolve_approval.
         agent_name = _AGENT_SUFFIX.sub("", agent)
@@ -263,6 +332,7 @@ class EventRepository:
             thread_id=thread_id,
             resolved=False,
             ordinal=self._lead_ordinal(orm.Approval, orm.Approval.event_id == event_id),
+            action=action,
         )
         activity = orm.ActivityItem(
             id=f"activity-{approval.id}",
@@ -305,7 +375,8 @@ class EventRepository:
             ordinal=self._lead_ordinal(orm.DecisionRecord, orm.DecisionRecord.event_id == approval.event_id),
         )
         activity = orm.ActivityItem(
-            id=f"activity-{approval.id}",
+            # Prefixed distinctly: create_approval already owns "activity-{approval.id}".
+            id=f"activity-decision-{approval.id}",
             event_id=approval.event_id,
             agent=agent_name,
             tone="green" if approved else "amber",
@@ -322,6 +393,26 @@ class EventRepository:
         self.db.add(activity)
         self.db.commit()
         return web.DecisionRecord.model_validate(decision)
+
+    def add_activity(self, event_id: str, *, agent: str, tone: str, description: str) -> None:
+        """One feed line, leading the rail — how background runs narrate themselves."""
+        self.db.add(
+            orm.ActivityItem(
+                id=f"activity-{uuid4().hex[:10]}",
+                event_id=event_id,
+                agent=agent,
+                tone=tone,
+                time_ago="just now",
+                description=description,
+                pool=False,
+                ordinal=self._lead_ordinal(
+                    orm.ActivityItem,
+                    orm.ActivityItem.event_id == event_id,
+                    orm.ActivityItem.pool.is_(False),
+                ),
+            )
+        )
+        self.db.commit()
 
     def toggle_rule(self, event_id: str, rule_id: str) -> web.SpendingRule | None:
         rule = self.db.get(orm.SpendingRule, rule_id)

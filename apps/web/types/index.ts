@@ -229,24 +229,22 @@ export interface Conversation {
   messages: InboxMessage[];
 }
 
-/** One turn in the Plan chat. Assistant turns that ran a browser task carry the session result. */
+/** One turn in the Plan chat. Assistant turns that ran an agent task carry the run result. */
 export interface PlanChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   createdAt: string; // ISO timestamp
   result?: SessionResult;
+  routedAgent?: string | null;
+  routedReason?: string | null;
   isError?: boolean;
 }
 
-// ---- Agent service (mirrors services/agent/integrations/h_company/schemas.py) ----
+// ---- Agent service (mirrors the agent's snake_case schemas: h_company, orchestrator,
+// supervisor, gradium — these surfaces are not camelCased like the dashboard DTOs) ----
 
-export interface ComputerUseRequest {
-  task: string;
-  agent?: string;
-}
-
-/** Honest result of one computer-use session; branch on `succeeded`. */
+/** Honest result of one agent session; branch on `succeeded`. */
 export interface SessionResult {
   succeeded: boolean;
   status: string; // completed | failed | timed_out | interrupted | idle | error
@@ -255,4 +253,55 @@ export interface SessionResult {
   error: string | null;
   session_id: string | null;
   agent_view_url: string | null;
+  data: Record<string, unknown> | null; // structured payload from data-returning turns
+}
+
+/** One background agent run (a chat turn or an approved action), polled until settled.
+ *  Optional fields are absent while the run is still `running`. */
+export interface AgentRunRecord {
+  id: string;
+  event_id?: string | null;
+  kind: string; // chat | booking
+  title: string;
+  status: string; // running | completed | failed | interrupted
+  agent?: string | null; // e.g. "requirements", "venue", "workflow/event_planning"
+  reason?: string | null; // the router's rationale; null when the assignment was explicit
+  result?: SessionResult | null;
+  created_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** One live H session as the agent rail shows it. Absent optionals are omitted, not null. */
+export interface AgentSessionSummary {
+  id: string;
+  agent?: string | null;
+  status: string;
+  task?: string | null;
+  agent_view_url?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface SessionQuota {
+  limit: number;
+  active: number;
+  available: number;
+}
+
+/** An event's live sessions plus quota; `succeeded` means the report is trustworthy. */
+export interface EventSessionsReport {
+  succeeded: boolean;
+  event_id: string;
+  sessions: AgentSessionSummary[];
+  quota?: SessionQuota | null;
+  error?: string | null;
+}
+
+/** Result of transcribing one voice clip; branch on `succeeded`. */
+export interface TranscriptionResult {
+  succeeded: boolean;
+  status: string;
+  text?: string | null;
+  error?: string | null;
 }

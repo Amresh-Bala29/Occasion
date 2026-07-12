@@ -8,8 +8,8 @@ const usd = new Intl.NumberFormat("en-US", {
 });
 
 /** The Budget page: stat cards, per-category spend, and suggested savings. */
-export async function BudgetTracker() {
-  const [{ budget }, detail] = await Promise.all([getDashboardData(), getBudgetDetail()]);
+export async function BudgetTracker({ eventId }: { eventId: string }) {
+  const [{ budget }, detail] = await Promise.all([getDashboardData(eventId), getBudgetDetail(eventId)]);
 
   const committed = budget.paidUsd + budget.pendingUsd;
   const committedPercent = Math.round((committed / budget.totalUsd) * 100);

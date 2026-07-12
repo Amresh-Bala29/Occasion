@@ -15,8 +15,11 @@ import sys
 from pathlib import Path
 
 # The agent service isn't an installed package; put its root on the path so its
-# database modules import exactly as they do when the service runs.
-AGENT_ROOT = Path(__file__).resolve().parents[1] / "services" / "agent"
+# database modules import exactly as they do when the service runs. In the agent
+# container this script sits inside the service root itself, so fall back to that.
+_HERE = Path(__file__).resolve()
+_REPO_AGENT = _HERE.parents[1] / "services" / "agent"
+AGENT_ROOT = _REPO_AGENT if _REPO_AGENT.exists() else _HERE.parent
 sys.path.insert(0, str(AGENT_ROOT))
 
 from sqlalchemy import delete  # noqa: E402

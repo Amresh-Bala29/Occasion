@@ -55,8 +55,9 @@ function ApprovalsCard({ count }: { count: number }) {
 function BudgetCard({ budget }: { budget: BudgetOverview }) {
   const committed = budget.paidUsd + budget.pendingUsd;
   const remaining = budget.totalUsd - committed;
-  const committedPercent = Math.round((committed / budget.totalUsd) * 100);
-  const widthOf = (amount: number) => `${(amount / budget.totalUsd) * 100}%`;
+  // A just-created event has no budget yet; show 0%, not NaN%.
+  const committedPercent = budget.totalUsd > 0 ? Math.round((committed / budget.totalUsd) * 100) : 0;
+  const widthOf = (amount: number) => (budget.totalUsd > 0 ? `${(amount / budget.totalUsd) * 100}%` : "0%");
 
   return (
     <section className="card flex flex-col px-5 py-[18px]" aria-label="Budget committed">

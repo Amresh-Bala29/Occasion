@@ -1,13 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { useEvent } from "@/hooks/useEvent";
+import { EVENT_COOKIE } from "@/lib/api";
+import type { EventOverview } from "@/types";
 
 interface SidebarProps {
   activeEvent: string;
+  activeEventId: string;
+  events: EventOverview[];
   messagesCount: number;
 }
 
@@ -23,7 +27,7 @@ const BADGE_TONE_CLASSES = {
   amber: "bg-warn-soft text-warn-deep",
 } as const;
 
-export function Sidebar({ activeEvent, messagesCount }: SidebarProps) {
+export function Sidebar({ activeEvent, activeEventId, events, messagesCount }: SidebarProps) {
   const pathname = usePathname();
   const { approvals, autoApproveLimit } = useEvent();
 
@@ -47,7 +51,7 @@ export function Sidebar({ activeEvent, messagesCount }: SidebarProps) {
         <span className="text-[16.5px] font-bold tracking-[-0.01em]">Occasion</span>
       </div>
 
-      <EventSwitcher activeEvent={activeEvent} />
+      <EventSwitcher activeEvent={activeEvent} activeEventId={activeEventId} events={events} />
 
       <nav
         className="flex flex-row gap-1 overflow-x-auto pb-0.5 md:flex-1 md:flex-col md:gap-0.5 md:overflow-visible md:pb-0"
@@ -93,10 +97,27 @@ export function Sidebar({ activeEvent, messagesCount }: SidebarProps) {
   );
 }
 
-/** Active-event selector; a single-event workspace for now, so the menu just confirms it. */
-function EventSwitcher({ activeEvent }: { activeEvent: string }) {
+/** Active-event selector: picking an event sets the cookie the server pages read. */
+function EventSwitcher({
+  activeEvent,
+  activeEventId,
+  events,
+}: {
+  activeEvent: string;
+  activeEventId: string;
+  events: EventOverview[];
+}) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  function switchTo(eventId: string) {
+    setOpen(false);
+    if (eventId === activeEventId) return;
+    // Not httpOnly on purpose: the client sets it, server components read it.
+    document.cookie = `${EVENT_COOKIE}=${encodeURIComponent(eventId)}; path=/; max-age=31536000`;
+    router.refresh();
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -146,18 +167,28 @@ function EventSwitcher({ activeEvent }: { activeEvent: string }) {
           role="menu"
           className="absolute inset-x-0 top-full z-30 mt-1.5 overflow-hidden rounded-[10px] border border-line bg-surface shadow-modal"
         >
-          <button
-            type="button"
-            role="menuitemradio"
-            aria-checked="true"
-            className="flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-2.5 text-left text-[13.5px] font-semibold hover:bg-brand-soft"
-            onClick={() => setOpen(false)}
-          >
-            {activeEvent}
-            <span className="text-brand" aria-hidden="true">
-              ✓
-            </span>
-          </button>
+          {events.map((event) => (
+            <button
+              key={event.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={event.id === activeEventId}
+              className="flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-2.5 text-left text-[13.5px] font-semibold hover:bg-brand-soft"
+              onClick={() => switchTo(event.id)}
+            >
+              <span className="min-w-0">
+                <span className="block truncate">{event.shortName}</span>
+                <span className="block text-[11px] font-normal text-ink-faint">
+                  {event.statusLabel} · {event.date}
+                </span>
+              </span>
+              {event.id === activeEventId && (
+                <span className="text-brand" aria-hidden="true">
+                  ✓
+                </span>
+              )}
+            </button>
+          ))}
           <div className="border-t border-line px-3 py-2.5 text-[12px] text-ink-faint">
             New events arrive here once Occasion plans them.
           </div>

@@ -1,24 +1,51 @@
 """Occasion agent service — FastAPI entry point."""
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import approvals, chat, computer_use, events, voice, webhooks
+from api.routes import approvals, chat, computer_use, events, runs, voice, webhooks
 from core.logging import configure_logging
-from database.connection import dispose
+from core.runs import run_manager
+from database.connection import dispose, new_session
+from database.repositories.run_repository import RunRepository
 
 configure_logging()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # Sync route handlers start background runs from threadpool threads; they need
+    # the loop captured here.
+    run_manager.bind(asyncio.get_running_loop())
+    _sweep_stale_runs()
+    yield
     # Connections are validated per-checkout (pool_pre_ping); just tear the pool
     # down cleanly on shutdown.
-    yield
     dispose()
+
+
+def _sweep_stale_runs() -> None:
+    """Runs a dead process left `running` can never settle; mark them interrupted.
+
+    Best-effort: the service must still boot (health, computer-use) with no
+    database configured, so a failed sweep logs instead of raising.
+    """
+    try:
+        db = new_session()
+        try:
+            count = RunRepository(db).interrupt_stale()
+            if count:
+                logger.warning("marked %d stale run(s) interrupted", count)
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("stale-run sweep skipped: database unavailable")
 
 
 app = FastAPI(title="Occasion Agent", lifespan=lifespan)
@@ -33,6 +60,7 @@ app.add_middleware(
 
 app.include_router(events.router, prefix="/events", tags=["events"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
+app.include_router(runs.router, prefix="/runs", tags=["runs"])
 app.include_router(approvals.router, prefix="/approvals", tags=["approvals"])
 app.include_router(voice.router, prefix="/voice", tags=["voice"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])

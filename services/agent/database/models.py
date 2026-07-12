@@ -14,9 +14,10 @@ rows get a synthetic integer key that never reaches the API. Every list carries 
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -66,6 +67,9 @@ class Approval(Base):
     thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     ordinal: Mapped[int] = mapped_column(Integer)
+    # The machine-readable action this approval authorizes (e.g. a book_vendor spec);
+    # display-only approvals leave it null and resolve without executing anything.
+    action: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class AgentStatusRow(Base):
@@ -346,3 +350,39 @@ class MemoryDocumentRow(Base):
     kind: Mapped[str] = mapped_column(Text)
     content: Mapped[str] = mapped_column(Text)
     meta: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+
+
+# ---- Runtime execution (backend-internal) ----
+
+
+class AgentRunRow(Base):
+    """One background agent run: a chat turn or an approved action being executed.
+
+    Rows are the durable side of core/runs.py — inserted `running`, settled to
+    completed/failed by the executing task, and swept to `interrupted` on boot if a
+    dead process left them behind. `result` holds the run's SessionResult dump.
+    """
+
+    __tablename__ = "agent_runs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    event_id: Mapped[str | None] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), nullable=True)
+    kind: Mapped[str] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text)
+    agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WebhookEventRow(Base):
+    """One inbound webhook, persisted verbatim for audit before any processing exists."""
+
+    __tablename__ = "webhook_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

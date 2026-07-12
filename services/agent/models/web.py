@@ -62,6 +62,13 @@ class ApprovalItem(CamelModel):
     thread_id: str | None = None
 
 
+class PendingApproval(ApprovalItem):
+    """An unresolved approval joined to its event, for the cross-event approvals list."""
+
+    event_id: str
+    event_name: str
+
+
 class AgentStatus(CamelModel):
     name: str
     tone: str
