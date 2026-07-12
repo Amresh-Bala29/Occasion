@@ -3,10 +3,11 @@
 // Client-side store for the event state that spans panels: pending approvals,
 // decision history, the live activity feed, and spending rules. Deciding an
 // approval here updates the sidebar badge, overview KPIs, activity rail, and
-// approvals page together. Swap the internals for real APIs when they land.
+// approvals page together. Initial data is fetched on the server and passed in
+// by the dashboard layout; mutations update optimistically, then persist.
 import { createContext, createElement, useContext, useEffect, useState, type ReactNode } from "react";
 
-import { getActivityPool, getDashboardData, getDecisionHistory, getSpendingRules } from "@/lib/api";
+import { DEFAULT_EVENT_ID, resolveApproval, saveAutoApproveLimit, toggleSpendingRule } from "@/lib/api";
 import type { ActivityItem, ApprovalItem, DecisionRecord, SpendingRule } from "@/types";
 
 interface EventStore {
@@ -21,22 +22,33 @@ interface EventStore {
   toggleRule: (id: string) => void;
 }
 
+/** Store data fetched on the server and handed to the provider by the layout. */
+export interface EventInitialData {
+  approvals: ApprovalItem[];
+  decisions: DecisionRecord[];
+  activity: ActivityItem[];
+  autoApproveLimit: string;
+  rules: SpendingRule[];
+  activityPool: ActivityItem[];
+}
+
 const EventContext = createContext<EventStore | null>(null);
 
 const FEED_LIMIT = 8;
 const FEED_TICK_MS = 4600;
 
-export function EventProvider({ children }: { children: ReactNode }) {
-  const [approvals, setApprovals] = useState(() => getDashboardData().approvals);
-  const [decisions, setDecisions] = useState(getDecisionHistory);
-  const [activity, setActivity] = useState(() => getDashboardData().activity);
-  const [autoApproveLimit, setAutoApproveLimit] = useState(() => getDashboardData().autoApproveLimit);
-  const [rules, setRules] = useState(getSpendingRules);
+export function EventProvider({ children, initial }: { children: ReactNode; initial: EventInitialData }) {
+  const [approvals, setApprovals] = useState(initial.approvals);
+  const [decisions, setDecisions] = useState(initial.decisions);
+  const [activity, setActivity] = useState(initial.activity);
+  const [autoApproveLimit, setLimit] = useState(initial.autoApproveLimit);
+  const [rules, setRules] = useState(initial.rules);
 
-  // Simulated live feed: rotate pre-written agent updates through the rail
+  // Simulated live feed: rotate the pre-fetched agent updates through the rail
   // until the real event stream lands.
   useEffect(() => {
-    const pool = getActivityPool();
+    const pool = initial.activityPool;
+    if (pool.length === 0) return;
     let tick = 0;
     const timer = setInterval(() => {
       const next = pool[tick % pool.length];
@@ -44,7 +56,7 @@ export function EventProvider({ children }: { children: ReactNode }) {
       setActivity((prev) => [{ ...next, id: `${next.id}-${tick}` }, ...prev].slice(0, FEED_LIMIT));
     }, FEED_TICK_MS);
     return () => clearInterval(timer);
-  }, []);
+  }, [initial.activityPool]);
 
   function decide(id: string, approved: boolean) {
     const item = approvals.find((approval) => approval.id === id);
@@ -54,6 +66,7 @@ export function EventProvider({ children }: { children: ReactNode }) {
       ? `You approved ${item.title} — ${item.amount}. The ${agentName} agent is proceeding now.`
       : `You declined ${item.title}. The ${agentName} agent will source an alternative.`;
 
+    // Optimistic: reflect the decision across every panel immediately, then persist.
     setApprovals((prev) => prev.filter((approval) => approval.id !== id));
     setDecisions((prev) => [
       { id: `decision-${id}`, title: item.title, amount: item.amount, when: "just now", approved },
@@ -71,6 +84,13 @@ export function EventProvider({ children }: { children: ReactNode }) {
         ...prev,
       ].slice(0, FEED_LIMIT),
     );
+
+    // Money-sensitive: roll the optimistic update back if the write doesn't land.
+    void resolveApproval(id, approved).catch(() => {
+      setApprovals((prev) => (prev.some((approval) => approval.id === id) ? prev : [item, ...prev]));
+      setDecisions((prev) => prev.filter((decision) => decision.id !== `decision-${id}`));
+      setActivity((prev) => prev.filter((entry) => entry.id !== `activity-${id}`));
+    });
   }
 
   function toggleRule(id: string) {
@@ -79,6 +99,12 @@ export function EventProvider({ children }: { children: ReactNode }) {
         rule.id === id ? { ...rule, value: rule.value === "Auto" ? "Ask first" : "Auto" } : rule,
       ),
     );
+    void toggleSpendingRule(DEFAULT_EVENT_ID, id).catch(() => {});
+  }
+
+  function setAutoApproveLimit(limit: string) {
+    setLimit(limit);
+    void saveAutoApproveLimit(DEFAULT_EVENT_ID, limit).catch(() => {});
   }
 
   const store: EventStore = {

@@ -6,6 +6,7 @@ Write code a human can read top-to-bottom and understand without a debugger.
 - **Object-oriented, cohesive.** Model the domain with well-named classes/objects that own their data and behavior. One responsibility each. Favor composition over inheritance. Keep methods small.
 - **Traceable.** Control flow should be obvious. Name things for what they do, not how. Avoid hidden side effects — a function's effects should be predictable from its signature and name.
 - **Maintainable.** Optimize for the next person reading this cold in six months. Explicit over implicit, boring over surprising.
+- **H-aware.** Consult the H Company agent docs at https://hub.hcompany.ai/computer-use-agents/introduction before implementing anything H-related.
 
 ## Comments
 - Comment the *why*, never the *what*. The code says what; comments explain intent, tradeoffs, and non-obvious constraints.

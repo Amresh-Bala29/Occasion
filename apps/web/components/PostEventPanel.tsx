@@ -5,12 +5,9 @@
 // scheduling API lands.
 import { useState } from "react";
 
-import { getDashboardData, getPostEventTasks } from "@/lib/api";
-import type { PostEventTask } from "@/types";
+import type { EventOverview, PostEventTask } from "@/types";
 
-export function PostEventPanel() {
-  const { event } = getDashboardData();
-  const tasks = getPostEventTasks();
+export function PostEventPanel({ event, tasks }: { event: EventOverview; tasks: PostEventTask[] }) {
   const [pausedIds, setPausedIds] = useState<ReadonlySet<string>>(new Set());
 
   function togglePaused(id: string) {

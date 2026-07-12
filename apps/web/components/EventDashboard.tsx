@@ -7,12 +7,16 @@ import { EventSummaryCard } from "@/components/EventSummaryCard";
 import { MetricCards } from "@/components/MetricCards";
 import { Topbar } from "@/components/Topbar";
 import { useEvent } from "@/hooks/useEvent";
-import { getDashboardData, getKeyDeadlines, getVendors } from "@/lib/api";
-import type { DeadlineItem, Vendor, VendorStatus } from "@/types";
+import type { DashboardData, DeadlineItem, Vendor, VendorStatus } from "@/types";
+
+interface EventDashboardProps {
+  data: DashboardData;
+  vendors: Vendor[];
+  deadlines: DeadlineItem[];
+}
 
 /** Overview page content; the sidebar and agent rail come from the dashboard layout. */
-export function EventDashboard() {
-  const data = getDashboardData();
+export function EventDashboard({ data, vendors, deadlines }: EventDashboardProps) {
   // Approvals come from the shared store so deciding one updates every panel.
   const { approvals } = useEvent();
 
@@ -48,8 +52,8 @@ export function EventDashboard() {
         </section>
 
         <section className="mt-3 grid gap-5 lg:grid-cols-[1.55fr_1fr]" aria-label="Vendors and key deadlines">
-          <VendorsPreview vendors={getVendors()} />
-          <KeyDeadlines deadlines={getKeyDeadlines()} />
+          <VendorsPreview vendors={vendors} />
+          <KeyDeadlines deadlines={deadlines} />
         </section>
       </main>
     </>

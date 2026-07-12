@@ -1,11 +1,24 @@
 """Occasion agent service — FastAPI entry point."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import approvals, chat, computer_use, events, voice, webhooks
+from database.connection import dispose
 
-app = FastAPI(title="Occasion Agent")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # Connections are validated per-checkout (pool_pre_ping); just tear the pool
+    # down cleanly on shutdown.
+    yield
+    dispose()
+
+
+app = FastAPI(title="Occasion Agent", lifespan=lifespan)
 
 # The web app calls this service straight from the browser during local dev.
 app.add_middleware(

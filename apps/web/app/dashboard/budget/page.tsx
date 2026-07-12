@@ -2,8 +2,8 @@ import { BudgetTracker } from "@/components/BudgetTracker";
 import { Topbar } from "@/components/Topbar";
 import { getDashboardData } from "@/lib/api";
 
-export default function BudgetPage() {
-  const data = getDashboardData();
+export default async function BudgetPage() {
+  const data = await getDashboardData();
 
   return (
     <>

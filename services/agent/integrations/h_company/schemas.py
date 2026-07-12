@@ -7,6 +7,12 @@ from pydantic import BaseModel, Field
 # Managed computer-use agent used for browser research tasks.
 DEFAULT_AGENT = "h/web-surfer-flash"
 
+# Holo models for inline domain agents. Deep is the strongest multi-step reasoner with a
+# 32K output ceiling; Fast trades depth for latency and caps output at 4K tokens, so it
+# only suits procedural flows with compact structured answers.
+MODEL_DEEP = "holo3-122b-a10b"
+MODEL_FAST = "holo3-1-35b-a3b"
+
 
 class ComputerUseRequest(BaseModel):
     """A natural-language task to run through the managed computer-use agent."""
@@ -24,12 +30,17 @@ class SessionResult(BaseModel):
     never produced a session. `outcome` is the agent's own assessment of its answer
     (success, partial, infeasible, blocked) and is what drives `succeeded` when present.
     Everything is passed through verbatim so no failure is papered over.
+
+    When the run requested an answer schema, the validated answer lands in `data` as a
+    JSON-mode dump and `answer` stays None. A run that settles idle without producing an
+    answer can leave `data` None even when `succeeded` is True.
     """
 
     succeeded: bool
     status: str
     outcome: str | None = None
     answer: str | None = None
+    data: dict | None = None
     error: str | None = None
     session_id: str | None = None
     agent_view_url: str | None = None

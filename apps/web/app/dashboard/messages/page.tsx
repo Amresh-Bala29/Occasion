@@ -9,12 +9,12 @@ export default async function MessagesPage({
 }) {
   // Approval cards deep-link here as /dashboard/messages?thread=<id>.
   const { thread } = await searchParams;
-  const data = getDashboardData();
+  const [data, conversations] = await Promise.all([getDashboardData(), getInboxConversations()]);
 
   return (
     <>
       <Topbar section="Messages" eventName={data.event.name} agentsWorking={data.agentsWorking} />
-      <MessagesInbox initialConversations={getInboxConversations()} initialThreadId={thread} />
+      <MessagesInbox initialConversations={conversations} initialThreadId={thread} />
     </>
   );
 }

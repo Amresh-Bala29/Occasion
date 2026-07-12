@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { getVendors } from "@/lib/api";
 import type { Vendor, VendorStatus } from "@/types";
 
 type VendorFilter = "All" | VendorStatus;
@@ -20,8 +19,8 @@ const STATUS_STYLES: Record<VendorStatus, { dot: string; text: string }> = {
 const GRID_COLS = "grid-cols-[2.2fr_1.1fr_0.9fr] md:grid-cols-[2.2fr_1.1fr_0.8fr_1fr_0.9fr]";
 
 /** The vendors tab: status filters over the full vendor table, plus ad-hoc category sourcing. */
-export function VendorsPanel() {
-  const [vendors, setVendors] = useState<Vendor[]>(getVendors);
+export function VendorsPanel({ initialVendors }: { initialVendors: Vendor[] }) {
+  const [vendors, setVendors] = useState<Vendor[]>(initialVendors);
   const [filter, setFilter] = useState<VendorFilter>("All");
   const [addingCategory, setAddingCategory] = useState(false);
 

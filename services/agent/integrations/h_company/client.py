@@ -1,18 +1,26 @@
 """H Company API client.
 
-A thin adapter over the `hai-agents` SDK. It runs one managed computer-use session and
-normalizes the SDK result into our own `SessionResult`, keeping every detail of the SDK's
-field names and status vocabulary in this one place.
+A thin adapter over H's two inference surfaces: computer-use sessions via the
+`hai-agents` SDK (HClient) and browserless chat completions via the OpenAI-compatible
+Models API (run_structured_completion). Both normalize into our own `SessionResult`,
+keeping every detail of H's field names and status vocabulary in this one place.
 """
 
 from __future__ import annotations
 
+import httpx
+from hai_agents import AnswerValidationError
+from pydantic import BaseModel, ValidationError
+
 from core.config import settings
-from integrations.h_company.schemas import SessionResult
+from integrations.h_company.schemas import MODEL_DEEP, SessionResult
 from integrations.h_company.session import browser_overrides
 
 _COMPLETED = "completed"
 _SUCCESS = "success"
+
+_MODELS_API_URL = "https://api.hcompany.ai/v1"
+_COMPLETION_TIMEOUT_S = 120.0
 
 
 class HClient:
@@ -26,8 +34,8 @@ class HClient:
     def from_settings(cls) -> "HClient":
         """Build a client from configured credentials.
 
-        The SDK is imported lazily so the package is only needed when a real session
-        actually runs; tests inject a double and never reach this path.
+        The SDK client is only constructed when a real session runs; tests inject a
+        double and never reach this path.
         """
         from hai_agents import Client
 
@@ -36,16 +44,48 @@ class HClient:
             kwargs["base_url"] = settings.hai_base_url
         return cls(Client(**kwargs))
 
-    def run_task(self, task: str, agent: str) -> SessionResult:
+    def run_task(
+        self,
+        task: str,
+        agent: str | dict,
+        *,
+        answer_schema: type[BaseModel] | None = None,
+        max_steps: int | None = None,
+        max_time_s: float | None = None,
+        group_id: str | None = None,
+    ) -> SessionResult:
         """Run one task to completion and return an honest result.
 
-        The SDK blocks until the session settles. A session that fails, times out, or is
-        blocked comes back as a normal result (never raised); only transport-level errors
-        reach the except branch.
+        `agent` is a managed-agent id or a full inline agent definition. The SDK blocks
+        until the session settles (`max_time_s` is the real bound — without it a stuck
+        session blocks indefinitely). A session that fails, times out, or is blocked
+        comes back as a normal result (never raised); only transport-level errors reach
+        the except branch.
         """
+        kwargs: dict[str, object] = {"agent": agent, "messages": task}
+        if isinstance(agent, str):
+            # Override selectors like agent.environments[kind=web] would also match an
+            # inline agent's environment and clobber its per-agent start_url, so the
+            # browser overrides stay on the managed-agent path only.
+            kwargs["overrides"] = browser_overrides()
+        if answer_schema is not None:
+            kwargs["answer_schema"] = answer_schema
+        if max_steps is not None:
+            kwargs["max_steps"] = max_steps
+        if max_time_s is not None:
+            kwargs["max_time_s"] = max_time_s
+        if group_id is not None:
+            kwargs["group_id"] = group_id
         try:
-            result = self._sdk.run_session(
-                agent=agent, messages=task, overrides=browser_overrides()
+            result = self._sdk.run_session(**kwargs)
+        except AnswerValidationError as exc:
+            # The run finished but its final answer failed schema validation. The
+            # exception carries only the raw payload — no session id or status.
+            return SessionResult(
+                succeeded=False,
+                status="error",
+                answer=_as_optional_str(exc.raw),
+                error=str(exc),
             )
         except Exception as exc:  # auth, rate limit, network — surface it, don't crash
             return _result_from_error(exc)
@@ -69,11 +109,20 @@ class HClient:
 def _result_from_session(result: object, agent_view_url: str | None) -> SessionResult:
     status = _as_optional_str(_unwrap(getattr(result, "status", None))) or "unknown"
     outcome = _as_optional_str(_unwrap(getattr(result, "outcome", None)))
+    answer_value = getattr(result, "answer", None)
+    data: dict | None = None
+    answer: str | None = None
+    if isinstance(answer_value, BaseModel):
+        # A schema-validated answer: one authoritative representation, in `data`.
+        data = answer_value.model_dump(mode="json")
+    else:
+        answer = _as_optional_str(answer_value)
     return SessionResult(
         succeeded=_succeeded(status, outcome),
         status=status,
         outcome=outcome,
-        answer=_as_optional_str(getattr(result, "answer", None)),
+        answer=answer,
+        data=data,
         error=_error_text(getattr(result, "error", None), getattr(result, "error_code", None)),
         session_id=_as_optional_str(getattr(result, "id", None)),
         agent_view_url=agent_view_url,
@@ -87,6 +136,80 @@ def _succeeded(status: str, outcome: str | None) -> bool:
     if outcome is not None:
         return outcome == _SUCCESS
     return status == _COMPLETED
+
+
+def run_structured_completion(
+    prompt: str,
+    instructions: str,
+    schema: type[BaseModel],
+    *,
+    model: str = MODEL_DEEP,
+    http_client: httpx.Client | None = None,
+) -> SessionResult:
+    """Run one browserless Holo chat completion, validated against `schema`.
+
+    The Models API is H's OpenAI-compatible inference endpoint; `structured_outputs` is
+    its constrained-JSON parameter, so the reply parses into `schema` by construction.
+    For agents whose work is pure reasoning over text — no browser session involved.
+    Failures come back as honest results, never raised, matching run_task.
+    """
+    if not settings.hai_api_key:
+        return SessionResult(
+            succeeded=False,
+            status="error",
+            error="HAI_API_KEY is not configured; set it in services/agent/.env",
+        )
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": prompt},
+        ],
+        # Extraction should be reproducible, not creative.
+        "temperature": 0.2,
+        "structured_outputs": {"json": schema.model_json_schema()},
+    }
+    base_url = settings.hai_base_url.rstrip("/") or _MODELS_API_URL
+    request = {
+        "url": f"{base_url}/chat/completions",
+        "headers": {"Authorization": f"Bearer {settings.hai_api_key}"},
+        "json": body,
+    }
+    try:
+        if http_client is not None:
+            response = http_client.post(**request)
+        else:
+            with httpx.Client(timeout=_COMPLETION_TIMEOUT_S) as client:
+                response = client.post(**request)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:  # transport failure, HTTP error status, or non-JSON body
+        return _result_from_error(exc)
+    content = _completion_content(payload)
+    if content is None:
+        return SessionResult(
+            succeeded=False,
+            status="error",
+            error="Models API response carried no message content",
+        )
+    try:
+        validated = schema.model_validate_json(content)
+    except ValidationError as exc:
+        return SessionResult(succeeded=False, status="error", answer=content, error=str(exc))
+    return SessionResult(
+        succeeded=True,
+        status="completed",
+        answer=content,
+        data=validated.model_dump(mode="json"),
+    )
+
+
+def _completion_content(payload: object) -> str | None:
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return content if isinstance(content, str) else None
 
 
 def _result_from_error(exc: Exception) -> SessionResult:

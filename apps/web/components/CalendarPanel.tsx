@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { getCalendarAgenda, getCalendarEvents } from "@/lib/api";
 import type { CalendarEventItem, CalendarEventKind, DeadlineItem } from "@/types";
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -49,11 +48,9 @@ function buildMonthCells(monthStart: Date, events: CalendarEventItem[]): DayCell
 }
 
 /** Calendar tab: navigable month grid of event deadlines plus the "Upcoming" rail. */
-export function CalendarPanel() {
+export function CalendarPanel({ events, agenda }: { events: CalendarEventItem[]; agenda: DeadlineItem[] }) {
   // The mock event lives in August 2026, so the calendar opens there.
   const [monthStart, setMonthStart] = useState(() => new Date(2026, 7, 1));
-  const events = getCalendarEvents();
-  const agenda = getCalendarAgenda();
 
   const shiftMonth = (delta: number) =>
     setMonthStart((current) => new Date(current.getFullYear(), current.getMonth() + delta, 1));

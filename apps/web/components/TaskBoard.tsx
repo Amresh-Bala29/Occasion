@@ -3,8 +3,7 @@
 import { useState } from "react";
 
 import { PlanChat } from "@/components/PlanChat";
-import { getEventPlan } from "@/lib/api";
-import type { Milestone, PlanPhase, PlanTaskGroup, RiskItem, Tone } from "@/types";
+import type { EventPlan, Milestone, PlanPhase, PlanTaskGroup, RiskItem, Tone } from "@/types";
 
 type PlanView = "board" | "chat";
 
@@ -17,8 +16,7 @@ const DOT_CLASS: Record<Tone, string> = {
 
 /** The plan panel: a phases/tasks/risks/milestones board, with a toggle into
  * the Occasion chat that runs real agent tasks. */
-export function TaskBoard({ eventId }: { eventId: string }) {
-  const plan = getEventPlan();
+export function TaskBoard({ eventId, plan }: { eventId: string; plan: EventPlan }) {
   const [view, setView] = useState<PlanView>("board");
   // Checkbox state lives here so the "X / Y done" counter tracks toggles.
   const [taskDone, setTaskDone] = useState<Record<string, boolean>>(() =>

@@ -1,27 +1,55 @@
-"""Tests for the H Company computer-use integration.
+"""Tests for the H Company computer-use integration and the domain-agent fleet.
 
 The hai-agents SDK is never called for real here — a fake session client stands in for
 it, so these tests assert how we normalize results and wire up the route. The fixtures
 mirror what a real h/web-surfer-flash run returns: a finished single-shot task settles to
 status "idle" with outcome "success", and the Agent View URL comes from get_session.
+The domain agents run through the same fake; the Models API is faked with an httpx
+MockTransport.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 from fastapi.testclient import TestClient
+from hai_agents import AnswerValidationError
+from hai_agents.types.agent import Agent as HAgentSpec
+from pydantic import BaseModel
 
 # Make the agent service root importable when pytest is run from anywhere.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agents.budget_agent import BudgetAgent  # noqa: E402
+from agents.catering_agent import CateringAgent  # noqa: E402
+from agents.decorations_agent import DecorationsAgent  # noqa: E402
+from agents.distribution_agent import DistributionAgent  # noqa: E402
+from agents.entertainment_agent import EntertainmentAgent  # noqa: E402
+from agents.marketing_agent import MarketingAgent  # noqa: E402
+from agents.merchandise_agent import MerchandiseAgent  # noqa: E402
+from agents.post_event_agent import PostEventAgent  # noqa: E402
+from agents.purchasing_agent import PurchasingAgent  # noqa: E402
+from agents.requirements_agent import EventRequirements, RequirementsAgent  # noqa: E402
+from agents.scheduling_agent import SchedulingAgent  # noqa: E402
+from agents.staffing_agent import StaffingAgent  # noqa: E402
+from agents.venue_agent import VenueAgent, VenueResearch  # noqa: E402
 from core.config import settings  # noqa: E402
 from integrations.h_company.client import HClient  # noqa: E402
 from integrations.h_company.computer_use import run_browser_task  # noqa: E402
-from integrations.h_company.schemas import ComputerUseRequest, SessionResult  # noqa: E402
+from integrations.h_company.schemas import (  # noqa: E402
+    MODEL_DEEP,
+    MODEL_FAST,
+    ComputerUseRequest,
+    SessionResult,
+)
 from main import app  # noqa: E402
+from models.task import Task  # noqa: E402
 
 # The first real task: research-only, with the guardrails baked into the prompt.
 VENUE_RESEARCH_TASK = (
@@ -238,3 +266,160 @@ def test_run_endpoint_rejects_empty_task() -> None:
 
 def test_health_endpoint() -> None:
     assert TestClient(app).get("/health").json() == {"status": "ok"}
+
+
+# --- Domain-agent fleet: inline agents, structured answers, and the Models API ---
+
+BROWSER_AGENTS = [
+    VenueAgent,
+    CateringAgent,
+    StaffingAgent,
+    EntertainmentAgent,
+    MerchandiseAgent,
+    DecorationsAgent,
+    PurchasingAgent,
+    MarketingAgent,
+    PostEventAgent,
+    BudgetAgent,
+    SchedulingAgent,
+    DistributionAgent,
+]
+
+
+class _Findings(BaseModel):
+    """Minimal answer schema for structured-output tests."""
+
+    items: list[str]
+
+
+def test_run_task_inline_agent_forwards_spec_without_overrides() -> None:
+    sdk = FakeSDK(fake_result(id="s", status="idle", outcome="success", answer="ok"))
+    spec = {
+        "name": "occasion-venue",
+        "description": "d",
+        "model": MODEL_DEEP,
+        "instructions": "i",
+        "environments": [{"kind": "web", "id": "browser"}],
+    }
+    result = HClient(sdk).run_task(task="hi", agent=spec, max_steps=5, max_time_s=60, group_id="evt-1")
+
+    assert result.succeeded is True
+    call = sdk.calls[0]
+    assert call["agent"] is spec
+    # Browser overrides target agent.environments[kind=web] and would clobber an inline
+    # agent's own environment, so they must stay off the inline path.
+    assert "overrides" not in call
+    assert call["max_steps"] == 5
+    assert call["max_time_s"] == 60
+    assert call["group_id"] == "evt-1"
+
+
+def test_answer_schema_returns_validated_data() -> None:
+    sdk = FakeSDK(fake_result(id="s", status="idle", outcome="success", answer=_Findings(items=["a"])))
+    result = HClient(sdk).run_task(task="hi", agent="h/web-surfer-flash", answer_schema=_Findings)
+
+    assert sdk.calls[0]["answer_schema"] is _Findings
+    assert result.succeeded is True
+    assert result.data == {"items": ["a"]}
+    assert result.answer is None  # one authoritative representation: data
+
+
+def test_answer_validation_error_is_honest_failure() -> None:
+    boom = AnswerValidationError("raw payload", _Findings, ValueError("items missing"))
+    result = HClient(FakeSDK(error=boom)).run_task(
+        task="hi", agent="h/web-surfer-flash", answer_schema=_Findings
+    )
+
+    assert result.succeeded is False
+    assert result.status == "error"
+    assert result.answer == "raw payload"  # the raw wire value is preserved, not dropped
+    assert "_Findings" in result.error
+
+
+def test_domain_agent_runs_inline_session(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(fake_result(id="s", status="idle", outcome="success", answer=None))
+    task = Task(id="t1", event_id="evt-42", title="Research three venues")
+    result = asyncio.run(VenueAgent(client=HClient(sdk)).run(task))
+
+    assert result.succeeded is True
+    call = sdk.calls[0]
+    assert call["messages"] == "Research three venues (event: evt-42)"
+    assert call["agent"]["name"] == "occasion-venue"
+    assert "approval was granted" in call["agent"]["instructions"]  # shared guardrails
+    assert call["answer_schema"] is VenueResearch
+    assert call["max_time_s"] == 2400
+    assert call["max_steps"] == 80
+    assert call["group_id"] == "evt-42"
+    assert "overrides" not in call
+
+
+def test_domain_agent_run_requires_api_key(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "")
+    guard = FakeSDK(error=AssertionError("SDK must not be called without a key"))
+    result = asyncio.run(VenueAgent(client=HClient(guard)).run("research venues"))
+
+    assert result.succeeded is False
+    assert result.status == "error"
+    assert "HAI_API_KEY" in result.error
+    assert guard.calls == []
+
+
+def test_agent_specs_are_wire_valid() -> None:
+    # One loop guards all 12 browser-agent configs against drift: H's name format, a
+    # known model, and the run bound that keeps a session from blocking forever.
+    for agent_class in BROWSER_AGENTS:
+        spec = agent_class().agent_spec()
+        assert re.fullmatch(r"[a-z0-9][a-z0-9-]*[a-z0-9]", spec["name"]), spec["name"]
+        assert spec["model"] in {MODEL_DEEP, MODEL_FAST}
+        assert spec["description"]
+        assert spec["environments"][0]["kind"] == "web"
+        assert agent_class.answer_schema is not None
+        assert agent_class.max_time_s is not None
+        HAgentSpec.model_validate(spec)  # the SDK's own wire model accepts the spec
+    # The requirements agent is browserless (Models API), so it carries no browser spec.
+    assert RequirementsAgent.answer_schema is EventRequirements
+    assert RequirementsAgent.model == MODEL_DEEP
+
+
+def test_requirements_agent_extracts_requirements(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        content = json.dumps(
+            {"event_type": "conference", "headcount": 150, "open_questions": ["What is the budget?"]}
+        )
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(respond))
+    agent = RequirementsAgent(http_client=http_client)
+    result = asyncio.run(agent.run("Client: we're planning a conference for about 150 people."))
+
+    assert result.succeeded is True
+    assert result.status == "completed"
+    assert result.data["event_type"] == "conference"
+    assert result.data["headcount"] == 150
+    assert result.data["open_questions"] == ["What is the budget?"]
+    request = seen[0]
+    assert request.url.path.endswith("/chat/completions")
+    assert request.headers["authorization"] == "Bearer hk-test"
+    body = json.loads(request.content)
+    assert body["model"] == MODEL_DEEP
+    assert body["structured_outputs"]["json"]["title"] == "EventRequirements"
+
+
+def test_requirements_agent_reports_malformed_content(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "not json"}}]})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(respond))
+    result = asyncio.run(RequirementsAgent(http_client=http_client).run("hello"))
+
+    assert result.succeeded is False
+    assert result.status == "error"
+    assert result.answer == "not json"  # raw content preserved for debugging
+    assert result.error
