@@ -30,6 +30,7 @@ from core.orchestrator import (  # noqa: E402
     DOMAIN_AGENTS,
     ROSTER_NAMES,
     ROUTING_INSTRUCTIONS,
+    WORKFLOWS,
     Orchestrator,
 )
 from integrations.h_company.client import HClient  # noqa: E402
@@ -121,6 +122,8 @@ def test_registry_covers_the_whole_fleet() -> None:
     # The router reads each description; an empty one would make its agent unroutable.
     assert all(cls.description for cls in DOMAIN_AGENTS.values())
     assert {DEFAULT_AGENT, "h/web-scraper-flash", "h/deep-search-pro"} <= ROSTER_NAMES
+    assert set(WORKFLOWS) == {"workflow/event_planning", "workflow/vendor_sourcing", "workflow/vendor_outreach"}
+    assert set(WORKFLOWS) <= ROSTER_NAMES
 
 
 def test_routing_instructions_list_every_agent() -> None:
@@ -128,6 +131,8 @@ def test_routing_instructions_list_every_agent() -> None:
         assert f"- {cls.name}: {cls.description}" in ROUTING_INSTRUCTIONS
     for agent_id, description in BUILTIN_AGENTS.items():
         assert f"- {agent_id}: {description}" in ROUTING_INSTRUCTIONS
+    for name, description in WORKFLOWS.items():
+        assert f"- {name}: {description}" in ROUTING_INSTRUCTIONS
 
 
 def test_explicit_assignee_skips_routing(monkeypatch) -> None:
@@ -216,6 +221,35 @@ def test_unknown_routed_name_falls_back_to_default_agent(monkeypatch) -> None:
     assert task.assignee_agent == DEFAULT_AGENT
     (call,) = sdk.calls
     assert call["agent"] == DEFAULT_AGENT
+
+
+def test_near_miss_workflow_name_falls_back_to_default_agent(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK(fake_result(status="idle", outcome="success", answer="browsed"))
+    # The router dropping the workflow/ prefix is the plausible near-miss.
+    http, _ = completion_client({"reason": "plan it all", "agent": "event_planning"})
+    task = make_task(title="Plan the entire company offsite")
+
+    run = asyncio.run(Orchestrator(client=HClient(sdk), http_client=http).run_task(task))
+
+    assert run.agent == DEFAULT_AGENT
+    assert "event_planning" in run.reason
+    (call,) = sdk.calls
+    assert call["agent"] == DEFAULT_AGENT
+
+
+def test_plain_string_task_cannot_run_a_workflow(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    sdk = FakeSDK()
+    http, requests = completion_client({"reason": "full event ask", "agent": "workflow/event_planning"})
+
+    run = asyncio.run(Orchestrator(client=HClient(sdk), http_client=http).run_task("plan our whole offsite"))
+
+    assert run.agent == "workflow/event_planning"
+    assert run.result.succeeded is False
+    assert "event-scoped Task" in run.result.error
+    assert len(requests) == 1  # only the routing call; the chain never started
+    assert sdk.calls == []
 
 
 def test_routing_failure_is_error_result(monkeypatch) -> None:
