@@ -26,11 +26,9 @@ docs/               Architecture notes and runbooks
   staffing, entertainment, decorations, merchandise, purchasing, marketing,
   distribution, scheduling, budget, post-event.
 - `workflows/` — multi-agent flows (event planning, vendor sourcing, outreach).
-- `integrations/` — external services: `h_company` (computer use), `gradium`
-  (voice), `email` (Gmail), `calendar` (Google Calendar), `distribution` (Luma,
-  Partiful, Eventbrite, Meetup).
-- `tools/` — capabilities exposed to agents (browser, email, calendar, search,
-  payment, file).
+- `integrations/` — external services: `h_company` (computer use, Models API),
+  `gradium` (voice STT/TTS). Email, calendar, and event distribution run through
+  the H cloud browser rather than dedicated API integrations.
 - `planning/` — task DAG, constraints, budget/schedule optimizers, risk.
 - `approvals/` — human-in-the-loop gates and spending rules.
 - `memory/` — event / user / vendor memory + vector store.
@@ -39,11 +37,17 @@ docs/               Architecture notes and runbooks
 ## Quickstart
 
 ```bash
-cp .env.example .env          # fill in credentials
 make setup                    # install web + agent deps (creates .venv)
+make migrate                  # apply database/migrations/*.sql (tracked in schema_migrations)
+make seed                     # insert the demo event (novaflow-summit-2026)
 make dev                      # run web (:3000) and agent (:8000) together
 # or, containerized:
 make up                       # docker compose: web + agent + postgres
 ```
 
-See the `Makefile` for individual targets (`web`, `agent`, `seed`, `test`).
+Credentials live next to the code that reads them: the agent service loads
+`services/agent/.env` (see `core/config.py`) and the web app loads
+`apps/web/.env.local`. The repo-root `.env.example` documents both sets; a root
+`.env` is not read by any process.
+
+See the `Makefile` for individual targets (`web`, `agent`, `migrate`, `seed`, `test`).

@@ -550,7 +550,7 @@ function Nav() {
           />
         </nav>
 
-        <Link href="/dashboard" className="btn btn-primary ml-auto whitespace-nowrap">
+        <Link href="/ask?new=1" className="btn btn-primary ml-auto whitespace-nowrap">
           Try Occasion
         </Link>
       </div>
@@ -585,7 +585,7 @@ function ProductSection() {
               book vendors on real websites — and pause for your approval before anything binding.
             </p>
             <div className="mt-7 flex flex-wrap items-center gap-3">
-              <Link href="/dashboard" className="btn btn-primary px-5 py-2.5 text-[14px]">
+              <Link href="/ask?new=1" className="btn btn-primary px-5 py-2.5 text-[14px]">
                 Open the dashboard →
               </Link>
               <a
@@ -1058,10 +1058,10 @@ function CtaBand() {
           Stop coordinating. <span className="text-[#8ea4f0]">Start approving.</span>
         </h2>
         <p className="mx-auto mt-5 max-w-[520px] text-[15px] leading-[1.65] text-[#a7b2cc]">
-          The dashboard opens on a live seeded event — NovaFlow Summit 2026, 320 guests, 26 days out, three approvals
-          waiting on you.
+          Tell Occasion what you&apos;re planning. It spins up the project, drafts the plan, and puts its agents to work
+          on real websites — pausing for your sign-off before anything binding.
         </p>
-        <Link href="/dashboard" className="btn btn-primary mt-8 inline-block px-7 py-3 text-[15px]">
+        <Link href="/ask?new=1" className="btn btn-primary mt-8 inline-block px-7 py-3 text-[15px]">
           Open the dashboard →
         </Link>
       </div>
@@ -1077,7 +1077,7 @@ function Footer() {
         <p className="font-mono text-[11px] tracking-[0.08em] text-ink-soft">
           autonomous event operations · built for the 7/11 SF hackathon
         </p>
-        <Link href="/dashboard" className="text-[13px] font-semibold text-brand hover:underline">
+        <Link href="/ask?new=1" className="text-[13px] font-semibold text-brand hover:underline">
           Dashboard →
         </Link>
       </div>

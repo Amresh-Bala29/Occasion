@@ -44,6 +44,33 @@ class ScheduleOptimizer:
             for ordinal, (_, title, when, done) in enumerate(entries)
         ]
 
+    def deadline_rows(self, event_id: str) -> list[orm.DeadlineItem]:
+        """The plan's key deadlines as the overview's 'key' list, oldest first.
+
+        The panel renders month/day chips, so only real calendar dates qualify;
+        T-minus or pending deadlines stay off it (they still show as milestones).
+        """
+        dated = [
+            (parsed, deadline)
+            for deadline in self._plan.key_deadlines
+            if (parsed := parse_iso_date(deadline.date)) is not None
+        ]
+        dated.sort(key=lambda pair: pair[0])
+        return [
+            orm.DeadlineItem(
+                id=f"{event_id}-deadline-{ordinal}",
+                event_id=event_id,
+                list_kind="key",
+                month=parsed.strftime("%b"),
+                day=f"{parsed.day:02d}",
+                title=deadline.title,
+                meta=deadline.consequence or "",
+                emphasis=None,
+                ordinal=ordinal,
+            )
+            for ordinal, (parsed, deadline) in enumerate(dated)
+        ]
+
 
 def _when_label(raw_date: str, parsed: date | None) -> str:
     if parsed is not None:

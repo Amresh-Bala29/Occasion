@@ -1,12 +1,15 @@
+import { cookies } from "next/headers";
+
 import { CalendarPanel } from "@/components/CalendarPanel";
 import { Topbar } from "@/components/Topbar";
-import { getCalendarAgenda, getCalendarEvents, getDashboardData } from "@/lib/api";
+import { DEFAULT_EVENT_ID, EVENT_COOKIE, getCalendarAgenda, getCalendarEvents, getDashboardData } from "@/lib/api";
 
 export default async function CalendarPage() {
+  const eventId = (await cookies()).get(EVENT_COOKIE)?.value ?? DEFAULT_EVENT_ID;
   const [data, events, agenda] = await Promise.all([
-    getDashboardData(),
-    getCalendarEvents(),
-    getCalendarAgenda(),
+    getDashboardData(eventId),
+    getCalendarEvents(eventId),
+    getCalendarAgenda(eventId),
   ]);
 
   return (

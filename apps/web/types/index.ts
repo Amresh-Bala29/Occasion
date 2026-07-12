@@ -229,24 +229,25 @@ export interface Conversation {
   messages: InboxMessage[];
 }
 
-/** One turn in the Plan chat. Assistant turns that ran a browser task carry the session result. */
-export interface PlanChatMessage {
+/** One turn in the Occasion chat. Assistant turns that ran an agent task carry the run result. */
+export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   createdAt: string; // ISO timestamp
   result?: SessionResult;
+  routedAgent?: string | null;
+  routedReason?: string | null;
   isError?: boolean;
+  // Open questions a requirements turn asked; [] means that turn settled the
+  // interview complete. Also feeds the transcript rebuilt for the next turn.
+  questions?: string[];
 }
 
-// ---- Agent service (mirrors services/agent/integrations/h_company/schemas.py) ----
+// ---- Agent service (mirrors the agent's snake_case schemas: h_company, orchestrator,
+// supervisor, gradium — these surfaces are not camelCased like the dashboard DTOs) ----
 
-export interface ComputerUseRequest {
-  task: string;
-  agent?: string;
-}
-
-/** Honest result of one computer-use session; branch on `succeeded`. */
+/** Honest result of one agent session; branch on `succeeded`. */
 export interface SessionResult {
   succeeded: boolean;
   status: string; // completed | failed | timed_out | interrupted | idle | error
@@ -255,4 +256,96 @@ export interface SessionResult {
   error: string | null;
   session_id: string | null;
   agent_view_url: string | null;
+  data: Record<string, unknown> | null; // structured payload from data-returning turns
+}
+
+/** One background agent run (a chat turn or an approved action), polled until settled.
+ *  Optional fields are absent while the run is still `running`. */
+export interface AgentRunRecord {
+  id: string;
+  event_id?: string | null;
+  kind: string; // chat | booking
+  title: string;
+  status: string; // running | completed | failed | interrupted
+  agent?: string | null; // e.g. "requirements", "venue", "workflow/event_planning"
+  reason?: string | null; // the router's rationale; null when the assignment was explicit
+  result?: SessionResult | null;
+  created_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** One live H session as the agent rail shows it. Absent optionals are omitted, not null. */
+export interface AgentSessionSummary {
+  id: string;
+  agent?: string | null;
+  status: string;
+  task?: string | null;
+  agent_view_url?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface SessionQuota {
+  limit: number;
+  active: number;
+  available: number;
+}
+
+/** One web obstacle a session cleared — a rail-strip line. */
+export interface ObstacleLine {
+  session_id: string;
+  agent?: string | null; // H agent name, e.g. "occasion-venue"
+  kind: string; // "cookie" | "popup" | "scroll" | "recovery"
+  label: string; // e.g. "dismissed cookie wall on eventbrite.com"
+  at?: string | null;
+}
+
+/** Event-wide tally of cleared obstacles; resets with the agent service. */
+export interface ObstaclesSummary {
+  cleared_total: number;
+  lines: ObstacleLine[]; // newest first, capped
+}
+
+/** An event's live sessions plus quota; `succeeded` means the report is trustworthy. */
+export interface EventSessionsReport {
+  succeeded: boolean;
+  event_id: string;
+  sessions: AgentSessionSummary[];
+  quota?: SessionQuota | null;
+  obstacles?: ObstaclesSummary | null; // absent until any session cleared one
+  error?: string | null;
+}
+
+/** One session's live health — lifecycle state plus a step counter while it works. */
+export interface SessionHealth {
+  succeeded: boolean;
+  session_id: string;
+  status: string; // lifecycle state, or "error" when the check itself failed
+  outcome?: string | null;
+  steps?: number | null;
+  error?: string | null;
+  subagent_session_ids?: string[];
+}
+
+/** The newest browser screenshot of one live session; the live grid polls this. */
+export interface SessionFrame {
+  succeeded: boolean;
+  session_id: string;
+  at?: string | null; // when the observation was taken
+  page_title?: string | null;
+  page_url?: string | null;
+  media_type?: string | null; // e.g. "image/png"
+  image_base64?: string | null; // absent while the session has no screenshot yet
+  handling?: string | null; // obstacle underway now, e.g. "cookie wall" | "recovering"
+  obstacles_cleared?: string[]; // this session's cleared labels, oldest first
+  error?: string | null;
+}
+
+/** Result of transcribing one voice clip; branch on `succeeded`. */
+export interface TranscriptionResult {
+  succeeded: boolean;
+  status: string;
+  text?: string | null;
+  error?: string | null;
 }

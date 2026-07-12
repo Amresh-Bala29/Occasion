@@ -8,11 +8,12 @@ const usd = new Intl.NumberFormat("en-US", {
 });
 
 /** The Budget page: stat cards, per-category spend, and suggested savings. */
-export async function BudgetTracker() {
-  const [{ budget }, detail] = await Promise.all([getDashboardData(), getBudgetDetail()]);
+export async function BudgetTracker({ eventId }: { eventId: string }) {
+  const [{ budget }, detail] = await Promise.all([getDashboardData(eventId), getBudgetDetail(eventId)]);
 
   const committed = budget.paidUsd + budget.pendingUsd;
-  const committedPercent = Math.round((committed / budget.totalUsd) * 100);
+  // A just-created event has no budget yet; show 0%, not NaN%.
+  const committedPercent = budget.totalUsd > 0 ? Math.round((committed / budget.totalUsd) * 100) : 0;
   const paidVendors = detail.categories.filter((category) => category.paidUsd > 0).length;
 
   const stats = [
@@ -40,8 +41,8 @@ export async function BudgetTracker() {
     <main className="mx-auto flex w-full max-w-[1010px] flex-col px-6 pt-[22px] pb-10">
       <h1 className="font-serif text-[28px] font-medium tracking-[-0.01em]">Budget</h1>
       <p className="mt-1.5 text-[14px] text-ink-soft">
-        A live ledger. The Budget agent tracks every committed and paid dollar against your $85,000
-        cap.
+        A live ledger. The Budget agent tracks every committed and paid dollar against your{" "}
+        {usd.format(budget.totalUsd)} cap.
       </p>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -99,8 +100,9 @@ function StatCard({ label, value, sub, valueClass = "" }: StatCardProps) {
 
 function CategoryRow({ category, totalUsd }: { category: BudgetCategory; totalUsd: number }) {
   // Segment widths are shares of the whole budget so bars compare across rows.
-  const paidPercent = (category.paidUsd / totalUsd) * 100;
-  const pendingPercent = ((category.committedUsd - category.paidUsd) / totalUsd) * 100;
+  // A just-created event has no budget yet; render empty bars, not NaN widths.
+  const paidPercent = totalUsd > 0 ? (category.paidUsd / totalUsd) * 100 : 0;
+  const pendingPercent = totalUsd > 0 ? ((category.committedUsd - category.paidUsd) / totalUsd) * 100 : 0;
 
   return (
     <div className="border-t border-line py-3.5 first:border-t-0">

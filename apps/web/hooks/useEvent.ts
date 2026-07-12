@@ -5,12 +5,14 @@
 // approval here updates the sidebar badge, overview KPIs, activity rail, and
 // approvals page together. Initial data is fetched on the server and passed in
 // by the dashboard layout; mutations update optimistically, then persist.
-import { createContext, createElement, useContext, useEffect, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
+import { createContext, createElement, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { DEFAULT_EVENT_ID, resolveApproval, saveAutoApproveLimit, toggleSpendingRule } from "@/lib/api";
+import { getActivity, resolveApproval, saveAutoApproveLimit, toggleSpendingRule } from "@/lib/api";
 import type { ActivityItem, ApprovalItem, DecisionRecord, SpendingRule } from "@/types";
 
 interface EventStore {
+  eventId: string;
   approvals: ApprovalItem[];
   decisions: DecisionRecord[];
   activity: ActivityItem[];
@@ -24,39 +26,69 @@ interface EventStore {
 
 /** Store data fetched on the server and handed to the provider by the layout. */
 export interface EventInitialData {
+  eventId: string;
   approvals: ApprovalItem[];
   decisions: DecisionRecord[];
   activity: ActivityItem[];
   autoApproveLimit: string;
   rules: SpendingRule[];
-  activityPool: ActivityItem[];
 }
 
 const EventContext = createContext<EventStore | null>(null);
 
 const FEED_LIMIT = 8;
-const FEED_TICK_MS = 4600;
+const ACTIVITY_POLL_MS = 12_000;
+
+function feedSignature(items: ActivityItem[]): string {
+  return items
+    .slice(0, FEED_LIMIT)
+    .map((item) => item.id)
+    .join("|");
+}
 
 export function EventProvider({ children, initial }: { children: ReactNode; initial: EventInitialData }) {
+  const eventId = initial.eventId;
+  const router = useRouter();
   const [approvals, setApprovals] = useState(initial.approvals);
   const [decisions, setDecisions] = useState(initial.decisions);
   const [activity, setActivity] = useState(initial.activity);
   const [autoApproveLimit, setLimit] = useState(initial.autoApproveLimit);
   const [rules, setRules] = useState(initial.rules);
+  // Ids only — timeAgo strings shift every poll and would refresh forever.
+  const lastFeedIds = useRef(feedSignature(initial.activity));
+  const inFlight = useRef(false);
 
-  // Simulated live feed: rotate the pre-fetched agent updates through the rail
-  // until the real event stream lands.
+  // The real feed: background runs and approval decisions write activity rows,
+  // and the rail polls them. A failed poll keeps the last good list. New rows are
+  // also the one signal that agent output landed server-side, so a feed change
+  // refreshes every server component (overview, vendors, plan, budget, deadlines)
+  // while this store's client state stays put.
   useEffect(() => {
-    const pool = initial.activityPool;
-    if (pool.length === 0) return;
-    let tick = 0;
-    const timer = setInterval(() => {
-      const next = pool[tick % pool.length];
-      tick += 1;
-      setActivity((prev) => [{ ...next, id: `${next.id}-${tick}` }, ...prev].slice(0, FEED_LIMIT));
-    }, FEED_TICK_MS);
-    return () => clearInterval(timer);
-  }, [initial.activityPool]);
+    let cancelled = false;
+    const poll = () => {
+      if (inFlight.current) return; // a slow response must not stack overlapping polls
+      inFlight.current = true;
+      getActivity(eventId)
+        .then((items) => {
+          if (cancelled) return;
+          setActivity(items.slice(0, FEED_LIMIT));
+          const signature = feedSignature(items);
+          if (signature !== lastFeedIds.current) {
+            lastFeedIds.current = signature;
+            router.refresh();
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlight.current = false;
+        });
+    };
+    const timer = setInterval(poll, ACTIVITY_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [eventId, router]);
 
   function decide(id: string, approved: boolean) {
     const item = approvals.find((approval) => approval.id === id);
@@ -99,15 +131,16 @@ export function EventProvider({ children, initial }: { children: ReactNode; init
         rule.id === id ? { ...rule, value: rule.value === "Auto" ? "Ask first" : "Auto" } : rule,
       ),
     );
-    void toggleSpendingRule(DEFAULT_EVENT_ID, id).catch(() => {});
+    void toggleSpendingRule(eventId, id).catch(() => {});
   }
 
   function setAutoApproveLimit(limit: string) {
     setLimit(limit);
-    void saveAutoApproveLimit(DEFAULT_EVENT_ID, limit).catch(() => {});
+    void saveAutoApproveLimit(eventId, limit).catch(() => {});
   }
 
   const store: EventStore = {
+    eventId,
     approvals,
     decisions,
     activity,

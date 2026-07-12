@@ -164,6 +164,16 @@ class MemoryRepository:
         stmt = stmt.order_by(rank.desc()).limit(limit)
         return [MemoryHit(document=_document(row), rank=float(score)) for row, score in self.db.execute(stmt).all()]
 
+    def list_documents(self, *, scope: str, kind: str, limit: int = 10) -> list[MemoryDocument]:
+        """Every `kind` document filed under exactly `scope`, oldest first (insertion order)."""
+        stmt = (
+            select(orm.MemoryDocumentRow)
+            .where(orm.MemoryDocumentRow.scope == scope, orm.MemoryDocumentRow.kind == kind)
+            .order_by(orm.MemoryDocumentRow.id)
+            .limit(limit)
+        )
+        return [_document(row) for row in self.db.scalars(stmt).all()]
+
 
 def _document(row: orm.MemoryDocumentRow) -> MemoryDocument:
     # Built by hand rather than model_validate: the ORM attribute is `meta` (the DB column

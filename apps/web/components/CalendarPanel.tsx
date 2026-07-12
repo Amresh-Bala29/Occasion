@@ -47,10 +47,18 @@ function buildMonthCells(monthStart: Date, events: CalendarEventItem[]): DayCell
   return cells;
 }
 
+/** Open on the event day's month (the accent marker) so the grid lands on the action;
+ *  fall back to the earliest event, then the current month. */
+function initialMonth(events: CalendarEventItem[]): Date {
+  const anchor = events.find((event) => event.kind === "accent") ?? events[0];
+  if (!anchor) return new Date();
+  const { year, month } = parseIsoDay(anchor.date);
+  return new Date(year, month, 1);
+}
+
 /** Calendar tab: navigable month grid of event deadlines plus the "Upcoming" rail. */
 export function CalendarPanel({ events, agenda }: { events: CalendarEventItem[]; agenda: DeadlineItem[] }) {
-  // The mock event lives in August 2026, so the calendar opens there.
-  const [monthStart, setMonthStart] = useState(() => new Date(2026, 7, 1));
+  const [monthStart, setMonthStart] = useState(() => initialMonth(events));
 
   const shiftMonth = (delta: number) =>
     setMonthStart((current) => new Date(current.getFullYear(), current.getMonth() + delta, 1));

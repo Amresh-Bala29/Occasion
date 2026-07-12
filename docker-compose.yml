@@ -5,6 +5,10 @@ services:
       dockerfile: infra/docker/web.Dockerfile
     ports: ["3000:3000"]
     env_file: [apps/web/.env.local]
+    environment:
+      # Server components fetch over the compose network; the browser (which reads
+      # the build-time NEXT_PUBLIC_AGENT_URL default) stays on localhost:8000.
+      AGENT_INTERNAL_URL: http://agent:8000
     depends_on: [agent]
 
   agent:
@@ -13,7 +17,15 @@ services:
       dockerfile: infra/docker/agent.Dockerfile
     ports: ["8000:8000"]
     env_file: [services/agent/.env]
-    depends_on: [db]
+    environment:
+      # Self-contained demo: compose always runs against its own Postgres, never
+      # the DATABASE_URL in services/agent/.env (Supabase for local dev).
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/occasion
+    # Migrate, then reset the demo data — each `make up` starts from a known state.
+    command: sh -c "python apply-migrations.py && python seed-demo-data.py && uvicorn main:app --host 0.0.0.0 --port 8000"
+    depends_on:
+      db:
+        condition: service_healthy
 
   db:
     image: postgres:16
@@ -22,6 +34,11 @@ services:
       POSTGRES_DB: occasion
     ports: ["5432:5432"]
     volumes: ["occasion-db:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d occasion"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 
 volumes:
   occasion-db:

@@ -16,6 +16,12 @@ if TYPE_CHECKING:
     from database.repositories.memory_repository import MemoryRepository
 
 
+# Document kinds written by one module and recalled by another (core/runs.py files them,
+# Memory.prompt_context reads them back); named here so the two never drift on a literal.
+CHAT_NOTE = "chat"
+DECISION = "decision"
+
+
 def event_scope(event_id: str, suffix: str | None = None) -> str:
     """Scope string for a document tied to one event, optionally narrowed (e.g. by category)."""
     return f"event:{event_id}:{suffix}" if suffix else f"event:{event_id}"
@@ -74,3 +80,8 @@ class SemanticMemory:
     def search(self, query: str, *, scope: str | None = None, limit: int = 5) -> list[MemoryHit]:
         """The best full-text matches for `query`, most relevant first, optionally within `scope`."""
         return self._repo.search(query=query, scope=scope, limit=limit)
+
+    def list(self, *, scope: str, kind: str, limit: int = 10) -> list[MemoryDocument]:
+        """Every `kind` document filed under exactly `scope`, oldest first — recall that must
+        not depend on matching a query (e.g. the event's recorded decisions)."""
+        return self._repo.list_documents(scope=scope, kind=kind, limit=limit)

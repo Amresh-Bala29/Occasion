@@ -1,50 +1,31 @@
 "use client";
 
-// Approvals page content: pending decisions and the decision log on the left,
-// editable spending rules on the right. Everything reads and writes the shared
-// useEvent store so the sidebar guardrail and overview stay in sync.
+// Settings page content: editable event details beside the spending rules that
+// govern what Occasion may do on its own. Spending rules read and write the shared
+// useEvent store so the sidebar guardrail stays in sync; event details persist via a
+// PATCH and a router refresh so every server-rendered surface picks up the change.
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { ApprovalCard } from "@/components/ApprovalCard";
 import { useEvent } from "@/hooks/useEvent";
-import type { DecisionRecord, SpendingRule } from "@/types";
+import { updateEventDetails } from "@/lib/api";
+import type { EventOverview, SpendingRule } from "@/types";
 
-export function ApprovalsPanel() {
-  const { approvals, decisions } = useEvent();
-
+export function ApprovalsPanel({ event }: { event: EventOverview }) {
   return (
     <main className="mx-auto flex w-full max-w-[1010px] flex-col px-6 pt-[22px] pb-10">
-      <div className="grid grid-cols-1 items-start gap-7 lg:grid-cols-[1.6fr_1fr]">
+      <h1 className="font-serif text-[28px] font-medium tracking-[-0.01em]">Settings</h1>
+      <p className="mt-1.5 mb-[22px] text-[14px] text-ink-soft">
+        Control your event details and how Occasion spends on your behalf.
+      </p>
+
+      <div className="grid grid-cols-1 items-start gap-7 lg:grid-cols-2">
         <div>
-          <h1 className="font-serif text-[28px] font-medium tracking-[-0.01em]">Approvals</h1>
-          <p className="mt-1.5 mb-[22px] text-[14px] text-ink-soft">
-            Agents prepare everything autonomously and pause here for anything that spends money or
-            is otherwise sensitive.
-          </p>
-
-          <div className="mb-[13px] flex items-center gap-2.5">
-            <h2 className="text-[16px] font-semibold">Pending</h2>
-            {approvals.length > 0 && <span className="chip chip-amber">{approvals.length}</span>}
-          </div>
-          {approvals.length > 0 ? (
-            <div className="flex flex-col gap-3">
-              {approvals.map((item) => (
-                <ApprovalCard key={item.id} item={item} />
-              ))}
-            </div>
-          ) : (
-            <NothingPending />
-          )}
-
-          <h2 className="mt-[26px] mb-[13px] text-[16px] font-semibold">Recent decisions</h2>
-          <section className="card divide-y divide-line px-[18px] py-1" aria-label="Recent decisions">
-            {decisions.map((decision) => (
-              <DecisionRow key={decision.id} decision={decision} />
-            ))}
-          </section>
+          <h2 className="mb-[13px] text-[16px] font-semibold">Event details</h2>
+          <EventDetailsCard event={event} />
         </div>
 
-        <div className="lg:sticky lg:top-[80px]">
+        <div>
           <h2 className="mb-[13px] text-[16px] font-semibold">Spending rules</h2>
           <SpendingRulesCard />
         </div>
@@ -53,40 +34,93 @@ export function ApprovalsPanel() {
   );
 }
 
-function NothingPending() {
-  return (
-    <div className="card px-5 py-[30px] text-center">
-      <span
-        className="inline-flex size-[34px] items-center justify-center rounded-full bg-positive-soft text-[17px] text-positive-deep"
-        aria-hidden="true"
-      >
-        ✓
-      </span>
-      <p className="mt-2.5 text-[15px] font-semibold">Nothing pending</p>
-      <p className="mt-1 text-[13px] text-ink-soft">
-        {"You're all caught up. Recent decisions are logged on the right."}
-      </p>
-    </div>
-  );
-}
+/** The event's user-owned descriptors, with an inline edit mode that persists on save. */
+function EventDetailsCard({ event }: { event: EventOverview }) {
+  const router = useRouter();
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState({
+    name: event.name,
+    kind: event.kind,
+    date: event.date,
+    location: event.location,
+    headcount: event.headcount,
+  });
 
-function DecisionRow({ decision }: { decision: DecisionRecord }) {
+  // headcount and date are free-text columns ("320", "TBD", "Aug 6"), so every field edits as text.
+  const fields: { key: keyof typeof draft; label: string }[] = [
+    { key: "name", label: "Event name" },
+    { key: "kind", label: "Type" },
+    { key: "date", label: "Date" },
+    { key: "location", label: "Location" },
+    { key: "headcount", label: "Guest count" },
+  ];
+
+  function startEditing() {
+    // Re-seed from the prop so edits start from the freshest server values.
+    setDraft({
+      name: event.name,
+      kind: event.kind,
+      date: event.date,
+      location: event.location,
+      headcount: event.headcount,
+    });
+    setEditing(true);
+  }
+
+  async function save() {
+    // Send only the fields the user actually changed: a partial PATCH leaves untouched
+    // values alone (e.g. the curated short name the backend syncs from `name`).
+    const patch: Partial<typeof draft> = {};
+    for (const key of Object.keys(draft) as (keyof typeof draft)[]) {
+      if (draft[key] !== event[key]) patch[key] = draft[key];
+    }
+    if (Object.keys(patch).length === 0) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      await updateEventDetails(event.id, patch);
+      // Refresh so the topbar, sidebar label, and summary card pick up the edit.
+      router.refresh();
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <div className="flex items-center gap-[13px] py-[13px]">
-      <span
-        className={`flex size-[18px] shrink-0 items-center justify-center rounded-full text-[10px] ${
-          decision.approved ? "bg-positive-soft text-positive-deep" : "bg-danger-soft text-danger"
-        }`}
-        role="img"
-        aria-label={decision.approved ? "Approved" : "Declined"}
+    <div className="card p-5">
+      <div className="flex flex-col gap-[13px]">
+        {fields.map((field) => (
+          <div key={field.key} className="flex items-center justify-between gap-4">
+            <span className="text-[13px] text-ink-soft">{field.label}</span>
+            {editing ? (
+              <input
+                type="text"
+                value={draft[field.key]}
+                onChange={(e) => setDraft((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                aria-label={field.label}
+                className="w-[190px] rounded-[8px] border border-line-strong px-2 py-1 text-right text-[13.5px] font-semibold"
+              />
+            ) : (
+              // Read straight from the prop so server refreshes (agent edits, intake
+              // handoff) show through; the draft only exists while editing.
+              <span className="text-[13.5px] font-semibold">{event[field.key]}</span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <button
+        type="button"
+        className={`btn mt-5 w-full ${editing ? "btn-primary" : "btn-secondary"}`}
+        onClick={() => (editing ? save() : startEditing())}
+        disabled={saving}
       >
-        {decision.approved ? "✓" : "✕"}
-      </span>
-      <span className="flex-1 text-[13.5px] font-medium">{decision.title}</span>
-      <span className="font-mono text-[12.5px] font-semibold">{decision.amount}</span>
-      <span className="w-[62px] text-right font-mono text-[10.5px] text-ink-faint">
-        {decision.when}
-      </span>
+        {editing ? (saving ? "Saving…" : "Save changes") : "Edit details"}
+      </button>
     </div>
   );
 }

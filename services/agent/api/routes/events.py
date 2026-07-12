@@ -6,13 +6,21 @@ calls in its threadpool. `response_model_exclude_none` keeps optional fields abs
 (not null) so the JSON matches the mock exactly.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.dependencies import get_event_repository, get_supervisor
-from core.supervisor import EventSessionsReport, Supervisor
+from api.dependencies import get_event_repository, get_run_manager, get_supervisor
+from approvals.approval_manager import ApprovalManager, ProposedAction
+from approvals.sensitive_actions import ActionCategory
+from core.runs import RunManager
+from core.supervisor import EventSessionsReport, SessionFrame, SessionHealth, Supervisor
 from database.repositories.event_repository import EventRepository
 from models import web
+from workflows.event_planning import VendorCategory
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -21,14 +29,54 @@ class AutoApproveLimitBody(BaseModel):
     limit: str
 
 
-@router.get("")
-async def list_events() -> list[dict]:
-    return []
+class UpdateEventBody(BaseModel):
+    name: str | None = None
+    kind: str | None = None
+    date: str | None = None
+    location: str | None = None
+    headcount: str | None = None
 
 
-@router.post("")
-async def create_event(payload: dict) -> dict:
-    return {"id": "evt_stub", **payload}
+class CreateEventBody(BaseModel):
+    name: str
+    kind: str = "Event"
+    date: str = "TBD"
+    location: str = "TBD"
+    headcount: str = "TBD"
+
+
+class BookingProposalBody(BaseModel):
+    """A vendor booking someone (or some agent) wants to make, pre-policy."""
+
+    vendor_name: str
+    url: str
+    category: VendorCategory
+    amount_usd: float = 0.0
+    description: str = ""
+    availability: str | None = None
+    price_notes: str | None = None
+    budget_cap_usd: float | None = None
+
+
+class BookingProposalResult(BaseModel):
+    """Where the proposal landed: executing now, or parked as a pending approval."""
+
+    status: str  # executing | pending_approval
+    reason: str
+    run_id: str | None = None
+    approval_id: str | None = None
+
+
+@router.get("", response_model=list[web.EventOverview], response_model_exclude_none=True)
+def list_events(repo: EventRepository = Depends(get_event_repository)) -> list[web.EventOverview]:
+    return repo.list_events()
+
+
+@router.post("", response_model=web.EventOverview)
+def create_event(body: CreateEventBody, repo: EventRepository = Depends(get_event_repository)) -> web.EventOverview:
+    return repo.create_event(
+        name=body.name, kind=body.kind, date=body.date, location=body.location, headcount=body.headcount
+    )
 
 
 @router.get("/{event_id}/dashboard", response_model=web.DashboardData, response_model_exclude_none=True)
@@ -94,6 +142,12 @@ def get_activity_pool(event_id: str, repo: EventRepository = Depends(get_event_r
     return repo.get_activity_pool(event_id)
 
 
+@router.get("/{event_id}/activity", response_model=list[web.ActivityItem], response_model_exclude_none=True)
+def get_activity(event_id: str, repo: EventRepository = Depends(get_event_repository)) -> list[web.ActivityItem]:
+    """The real feed — what agents actually did — newest first; the rail polls this."""
+    return repo.get_activity(event_id)
+
+
 @router.post("/{event_id}/spending-rules/{rule_id}", response_model=web.SpendingRule)
 def toggle_spending_rule(
     event_id: str, rule_id: str, repo: EventRepository = Depends(get_event_repository)
@@ -114,6 +168,71 @@ def set_auto_approve_limit(
     return {"autoApproveLimit": value}
 
 
+@router.patch("/{event_id}", response_model=web.EventOverview)
+def update_event(
+    event_id: str, body: UpdateEventBody, repo: EventRepository = Depends(get_event_repository)
+) -> web.EventOverview:
+    event = repo.update_event(
+        event_id,
+        name=body.name,
+        kind=body.kind,
+        date=body.date,
+        location=body.location,
+        headcount=body.headcount,
+    )
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"Event {event_id!r} not found")
+    return event
+
+
+@router.post("/{event_id}/bookings", response_model=BookingProposalResult, response_model_exclude_none=True)
+def propose_booking(
+    event_id: str,
+    body: BookingProposalBody,
+    repo: EventRepository = Depends(get_event_repository),
+    runs: RunManager = Depends(get_run_manager),
+) -> BookingProposalResult:
+    """The propose → approve → execute loop's entry point.
+
+    The spending policy decides on the spot: within the user's auto-approve rules
+    the booking executes immediately as a background run; otherwise it becomes a
+    pending approval carrying the action, and approving it in the dashboard
+    executes the same way. Either path lands in the activity rail.
+    """
+    action = {
+        "type": "book_vendor",
+        "event_id": event_id,
+        "candidate": {
+            "name": body.vendor_name,
+            "url": body.url,
+            "category": body.category,
+            "availability": body.availability,
+            "price_notes": body.price_notes,
+        },
+        "budget_cap_usd": body.budget_cap_usd,
+        # Carried so the confirmed vendor row can show the approved amount as its cost.
+        "amount_usd": body.amount_usd,
+    }
+    decision = ApprovalManager(repo).review(
+        ProposedAction(
+            event_id=event_id,
+            agent="Purchasing agent",
+            category=ActionCategory.DEPOSIT,
+            title=f"Book {body.vendor_name}",
+            description=body.description or f"Booking {body.vendor_name} ({body.category}).",
+            vendor=body.vendor_name,
+            amount_usd=body.amount_usd,
+            action=action,
+        )
+    )
+    if decision.requires_approval:
+        return BookingProposalResult(
+            status="pending_approval", reason=decision.reason, approval_id=decision.approval_id
+        )
+    record = runs.start_booking(action, approval_note=f"Auto-approved by your spending rules: {decision.reason}")
+    return BookingProposalResult(status="executing", reason=decision.reason, run_id=record.id)
+
+
 @router.get("/{event_id}/agent-sessions", response_model=EventSessionsReport, response_model_exclude_none=True)
 def get_agent_sessions(event_id: str, supervisor: Supervisor = Depends(get_supervisor)) -> EventSessionsReport:
     """Live H sessions for this event plus the account's session-slot quota.
@@ -122,3 +241,55 @@ def get_agent_sessions(event_id: str, supervisor: Supervisor = Depends(get_super
     scoping needs no DB), and a missing key or H failure is succeeded=False, not a raise.
     """
     return supervisor.event_sessions(event_id)
+
+
+@router.get(
+    "/{event_id}/sessions/{session_id}/health", response_model=SessionHealth, response_model_exclude_none=True
+)
+def get_session_health(
+    event_id: str, session_id: str, supervisor: Supervisor = Depends(get_supervisor)
+) -> SessionHealth:
+    """Live health for one session — the chat ticker's step counter.
+
+    event_id keeps the read surface event-scoped; H session ids are global, so it
+    isn't checked. Always 200 with an honest report, like agent-sessions.
+    """
+    return supervisor.session_health(session_id)
+
+
+@router.get(
+    "/{event_id}/sessions/{session_id}/frame", response_model=SessionFrame, response_model_exclude_none=True
+)
+def get_session_frame(
+    event_id: str,
+    session_id: str,
+    supervisor: Supervisor = Depends(get_supervisor),
+    repo: EventRepository = Depends(get_event_repository),
+) -> SessionFrame:
+    """The newest browser screenshot for one session — a live-grid tile.
+
+    event_id keeps the read surface event-scoped; H session ids are global, so it
+    isn't checked. Always 200 with an honest report, like health.
+    """
+    frame = supervisor.session_frame(session_id)
+    # Durable trace of cleared obstacles: the frame poll is the only place obstacle
+    # detection runs (H has no webhooks), and drain-once means each line lands in the
+    # feed exactly once even with concurrent viewers. A write failure must never cost
+    # the tile its frame.
+    try:
+        for line in supervisor.drain_obstacle_feed(session_id):
+            repo.add_activity(
+                event_id,
+                agent=_obstacle_agent(line.agent),
+                tone="green",
+                description=f"✓ {line.label[:1].upper()}{line.label[1:]} — kept going.",
+            )
+    except Exception:
+        logger.exception("failed to record cleared obstacles for session %s", session_id)
+    return frame
+
+
+def _obstacle_agent(agent: str | None) -> str:
+    """Feed byline for an obstacle line: "occasion-venue" -> "Venue agent"."""
+    name = (agent or "").removeprefix("occasion-").strip()
+    return f"{name.capitalize()} agent" if name else "Web agent"

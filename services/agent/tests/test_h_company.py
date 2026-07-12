@@ -21,11 +21,13 @@ import httpx
 from fastapi.testclient import TestClient
 from hai_agents import AnswerValidationError
 from hai_agents.types.agent import Agent as HAgentSpec
+from hai_agents.types.skill import Skill as HSkill
 from pydantic import BaseModel
 
 # Make the agent service root importable when pytest is run from anywhere.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agents.base_agent import GUARDRAILS, SURVIVAL_SKILLS  # noqa: E402
 from agents.budget_agent import BudgetAgent  # noqa: E402
 from agents.catering_agent import CateringAgent  # noqa: E402
 from agents.decorations_agent import DecorationsAgent  # noqa: E402
@@ -378,7 +380,11 @@ def test_domain_agent_runs_inline_session(monkeypatch) -> None:
     call = sdk.calls[0]
     assert call["messages"] == "Research three venues (event: evt-42)"
     assert call["agent"]["name"] == "occasion-venue"
-    assert "approval was granted" in call["agent"]["instructions"]  # shared guardrails
+    instructions = call["agent"]["instructions"]
+    assert "approval was granted" in instructions  # shared guardrails
+    assert "dismiss them yourself" in instructions  # routine obstacles are handled, not fatal
+    assert "true blockers" in instructions  # CAPTCHA/2FA/credential-less login still stop
+    assert "stop and report the blocker as" not in instructions  # the old stop-on-everything bullet is gone
     assert call["answer_schema"] is VenueResearch
     assert call["max_time_s"] == 2400
     assert call["max_steps"] == 80
@@ -406,12 +412,39 @@ def test_agent_specs_are_wire_valid() -> None:
         assert spec["model"] in {MODEL_DEEP, MODEL_FAST}
         assert spec["description"]
         assert spec["environments"][0]["kind"] == "web"
+        # The messy-web survival set leads every skill list; domain skills follow.
+        names = [skill["name"] for skill in spec["skills"]]
+        assert names[: len(SURVIVAL_SKILLS)] == [skill["name"] for skill in SURVIVAL_SKILLS]
         assert agent_class.answer_schema is not None
         assert agent_class.max_time_s is not None
         HAgentSpec.model_validate(spec)  # the SDK's own wire model accepts the spec
     # The requirements agent is browserless (Models API), so it carries no browser spec.
     assert RequirementsAgent.answer_schema is EventRequirements
     assert RequirementsAgent.model == MODEL_DEEP
+
+
+def test_survival_skills_ride_every_browser_agent() -> None:
+    # A skill-less agent gets exactly the shared set; a skilled one keeps its own after it.
+    venue_names = [skill["name"] for skill in VenueAgent().agent_spec()["skills"]]
+    assert venue_names == [skill["name"] for skill in SURVIVAL_SKILLS]
+    distribution_names = [skill["name"] for skill in DistributionAgent().agent_spec()["skills"]]
+    assert distribution_names[: len(SURVIVAL_SKILLS)] == venue_names
+    assert "luma-event-posting" in distribution_names[len(SURVIVAL_SKILLS) :]
+    for skill in SURVIVAL_SKILLS:
+        assert "url_pattern" not in skill  # site-agnostic on purpose: applies anywhere
+        HSkill.model_validate(skill)  # the SDK's own wire model accepts each skill
+
+
+def test_guardrails_keep_true_blockers() -> None:
+    # The handle-then-report flip must not touch the lines other code keys on: the
+    # workflows embed exact approval/budget text, and security checks still hard-stop.
+    assert "approval was granted" in GUARDRAILS
+    assert "Respect any budget cap stated in the task" in GUARDRAILS
+    assert "CAPTCHA" in GUARDRAILS
+    assert "two-factor" in GUARDRAILS
+    assert "guessing credentials" in GUARDRAILS
+    assert "dismiss them yourself" in GUARDRAILS  # routine overlays are the agent's own job
+    assert "obstacles you cleared" in GUARDRAILS  # answers carry the audit trail
 
 
 def test_requirements_agent_extracts_requirements(monkeypatch) -> None:
@@ -442,6 +475,56 @@ def test_requirements_agent_extracts_requirements(monkeypatch) -> None:
     body = json.loads(request.content)
     assert body["model"] == MODEL_DEEP
     assert body["structured_outputs"]["json"]["title"] == "EventRequirements"
+
+
+def test_requirements_agent_caps_clarifying_rounds(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    monkeypatch.setattr(settings, "hai_models_base_url", "https://models.test/v1")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        # The model still wants to ask more; once the cap is hit it must be overruled.
+        content = json.dumps({"event_type": "gala", "headcount": 200, "open_questions": ["Indoor or outdoor?"]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(respond))
+    # A transcript that already records three asked rounds — the markers ChatPanel writes.
+    transcript = (
+        "Client: we're planning a gala\n"
+        "Occasion asked: how many guests?\n"
+        "Client: about 200\n"
+        "Occasion asked: what's the date?\n"
+        "Client: Sept 18\n"
+        "Occasion asked: what's the budget?\n"
+        "Client: around 50k"
+    )
+    result = asyncio.run(RequirementsAgent(http_client=http_client).run(transcript))
+
+    assert result.succeeded is True
+    assert result.data["event_type"] == "gala"  # what it extracted still stands
+    assert result.data["open_questions"] == []  # but the interview is forced complete
+    assert json.loads(result.answer)["open_questions"] == []  # answer kept consistent with data
+
+
+def test_requirements_agent_keeps_asking_under_the_cap(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    monkeypatch.setattr(settings, "hai_models_base_url", "https://models.test/v1")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        content = json.dumps({"event_type": "gala", "open_questions": ["What's the budget?"]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(respond))
+    # Two rounds asked so far — still under the cap, so the next question survives.
+    transcript = (
+        "Client: we're planning a gala\n"
+        "Occasion asked: how many guests?\n"
+        "Client: about 200\n"
+        "Occasion asked: what's the date?\n"
+        "Client: Sept 18"
+    )
+    result = asyncio.run(RequirementsAgent(http_client=http_client).run(transcript))
+
+    assert result.data["open_questions"] == ["What's the budget?"]
 
 
 def test_requirements_agent_reports_malformed_content(monkeypatch) -> None:

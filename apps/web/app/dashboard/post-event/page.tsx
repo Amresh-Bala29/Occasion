@@ -1,9 +1,12 @@
+import { cookies } from "next/headers";
+
 import { PostEventPanel } from "@/components/PostEventPanel";
 import { Topbar } from "@/components/Topbar";
-import { getDashboardData, getPostEventTasks } from "@/lib/api";
+import { DEFAULT_EVENT_ID, EVENT_COOKIE, getDashboardData, getPostEventTasks } from "@/lib/api";
 
 export default async function PostEventPage() {
-  const [data, tasks] = await Promise.all([getDashboardData(), getPostEventTasks()]);
+  const eventId = (await cookies()).get(EVENT_COOKIE)?.value ?? DEFAULT_EVENT_ID;
+  const [data, tasks] = await Promise.all([getDashboardData(eventId), getPostEventTasks(eventId)]);
 
   return (
     <>

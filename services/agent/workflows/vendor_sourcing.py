@@ -18,6 +18,7 @@ research run.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,7 @@ from memory.event_memory import SHORTLIST
 from memory.vector_store import event_scope
 from models.task import Task
 from workflows.event_planning import (
+    SOURCEABLE_CATEGORIES,
     EventPlan,
     VendorCategory,
     complete,
@@ -44,6 +46,8 @@ from workflows.event_planning import (
 
 if TYPE_CHECKING:
     from core.state import Memory
+
+logger = logging.getLogger(__name__)
 
 # Retail-style carts check out through purchasing — the only agent whose remit covers
 # completing a purchase. Relationship bookings stay with the category specialist,
@@ -92,7 +96,9 @@ class CategoryRecommendation(BaseModel):
 class VendorShortlist(BaseModel):
     """The synthesis answer: ranked candidates, picks, and honest gaps."""
 
-    candidates: list[VendorCandidate] = []
+    # No default: `candidates` must appear in the answer schema's required set, so a
+    # completion that omits it fails validation instead of passing as an empty list.
+    candidates: list[VendorCandidate]
     recommendations: list[CategoryRecommendation] = []
     gaps: list[str] = Field(default=[], description="Categories whose research failed or found nothing viable.")
     next_steps: list[str] = []
@@ -140,6 +146,8 @@ Rules:
   verbatim from the research JSON — never invent or normalize them.
 - Respect each category's budget cap when ranking, and flag options that exceed it.
 - Record a gap for every category whose research failed or found nothing viable.
+- candidates must contain every viable vendor found in the research; an empty
+  candidates list is only correct when every category is a gap.
 - Note cross-category tradeoffs (money saved in one category funding another) in
   the recommendations.
 - next_steps names the specific candidates to contact for quotes."""
@@ -201,14 +209,48 @@ class VendorSourcingWorkflow:
 
         report.research_tasks = self._research_tasks(plan, report.briefs, event_id)
         report.research_runs = await self._orchestrator.run_tasks(report.research_tasks)
-        self._remember_research(report.research_tasks, report.research_runs, event_id)
 
-        report.shortlist_run = await self._synthesize(plan, report.research_tasks, report.research_runs)
-        report.shortlist = structured(report.shortlist_run, VendorShortlist)
-        report.succeeded = report.shortlist is not None
-        if self._memory is not None and report.shortlist is not None:
-            self._memory.event(event_id).set(SHORTLIST, report.shortlist.model_dump(mode="json"))
+        report.shortlist_run, report.shortlist = await self.shortlist_findings(
+            plan, report.research_tasks, report.research_runs, event_id=event_id
+        )
+        # An all-gaps shortlist is an honest report of a failed round, not a success.
+        report.succeeded = report.shortlist is not None and (
+            bool(report.shortlist.candidates) or not plan.vendor_categories
+        )
         return report
+
+    async def shortlist_findings(
+        self, plan: EventPlan, tasks: list[Task], runs: list[TaskRun], *, event_id: str
+    ) -> tuple[SessionResult | None, VendorShortlist | None]:
+        """Merge per-category research runs into one shortlist, refusing to lose findings.
+
+        Shared by run() and the boot-time reconciler in core/runs.py: both hold a plan
+        plus per-category research results and need the same synthesis, retry, fallback,
+        gap enforcement, and memory snapshot. The returned SessionResult is the real
+        synthesis run — possibly failed or empty even when the fallback supplied the
+        candidates — so the audit trail stays honest.
+        """
+        self._remember_research(tasks, runs, event_id)
+        shortlist_run = await self._synthesize(plan, tasks, runs)
+        shortlist = structured(shortlist_run, VendorShortlist)
+        researched = any(run.result.data is not None for run in runs)
+        if shortlist is not None and not shortlist.candidates and researched:
+            # One retry: an empty shortlist over real findings throws away hours of
+            # browser work to save a two-minute completion.
+            logger.warning("shortlist ignored the research findings; retrying synthesis once")
+            shortlist_run = await self._synthesize(plan, tasks, runs)
+            shortlist = structured(shortlist_run, VendorShortlist)
+        if shortlist is None or not shortlist.candidates:
+            fallback = self._fallback_shortlist(tasks, runs)
+            if fallback is not None:
+                logger.warning("synthesis produced no candidates; shortlisting the research options directly")
+                shortlist = fallback
+        if shortlist is not None:
+            self._enforce_gaps(plan, tasks, runs, shortlist)
+        succeeded = shortlist is not None and (bool(shortlist.candidates) or not plan.vendor_categories)
+        if self._memory is not None and succeeded:
+            self._memory.event(event_id).set(SHORTLIST, shortlist.model_dump(mode="json"))
+        return shortlist_run, shortlist
 
     async def book(
         self,
@@ -310,19 +352,96 @@ class VendorSourcingWorkflow:
             blocks.append(reputation)
         for task, run in zip(tasks, runs):
             category = task.assignee_agent
-            if run.result.succeeded and run.result.data is not None:
-                blocks.append(f"{category} research (JSON):\n{json.dumps(run.result.data)}")
+            if run.result.data is not None:
+                # A partial run still carries schema-valid findings; the label lets the
+                # model weigh them without mistaking them for complete research.
+                note = "" if run.result.succeeded else f", incomplete: {run.result.outcome or run.result.status}"
+                blocks.append(f"{category} research (JSON{note}):\n{json.dumps(run.result.data)}")
             else:
                 # The failure must be model-visible so it lands in gaps, not silence.
                 reason = run.result.error or run.result.status
                 blocks.append(f"{category} research: RESEARCH FAILED: {reason}")
         return await complete("\n\n".join(blocks), SHORTLIST_INSTRUCTIONS, VendorShortlist, http_client=self._http)
 
+    def _enforce_gaps(
+        self, plan: EventPlan, tasks: list[Task], runs: list[TaskRun], shortlist: VendorShortlist
+    ) -> None:
+        """A category with no shortlisted candidate must read as a gap whatever the
+        synthesis said — the dashboard's honesty cannot hinge on the model remembering."""
+        shortlisted = {candidate.category for candidate in shortlist.candidates}
+        researched = {task.assignee_agent for task, run in zip(tasks, runs) if run.result.data is not None}
+        for category in plan.vendor_categories:
+            name = category.category
+            if name in shortlisted or any(name in gap.lower() for gap in shortlist.gaps):
+                continue
+            reason = (
+                "research found no viable candidates"
+                if name in researched
+                else "research produced no usable findings"
+            )
+            shortlist.gaps.append(f"{name}: {reason}")
+
+    def _fallback_shortlist(self, tasks: list[Task], runs: list[TaskRun]) -> VendorShortlist | None:
+        """A shortlist built straight from the research options when synthesis drops them.
+
+        Each research agent answers a schema-valid list of findings, but the list and
+        item fields are named per category (options/candidates/items/quotes), so when
+        the merge completion returns no candidates over real findings, this maps the
+        options mechanically instead of discarding hours of browser work. Research order
+        within each category becomes the rank.
+        """
+        candidates: list[VendorCandidate] = []
+        for task, run in zip(tasks, runs):
+            category = task.assignee_agent
+            # Only category assignees fit VendorCandidate.category; partial runs count —
+            # a timed-out session's verified options are still real findings.
+            if category not in SOURCEABLE_CATEGORIES or run.result.data is None:
+                continue
+            options = _research_options(run.result.data)
+            if options is None:
+                continue
+            recommended = run.result.data.get("recommended")
+            rank = 0
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                name = _option_name(option)
+                if not name:
+                    continue
+                rank += 1
+                candidates.append(
+                    VendorCandidate(
+                        category=category,
+                        name=name,
+                        url=_option_text(option.get("url")) or "",
+                        price_notes=_option_text(
+                            option.get("price_notes")
+                            or option.get("price_per_person")
+                            or option.get("rate_notes")
+                            or option.get("unit_price")
+                            or option.get("unit_price_notes")
+                        ),
+                        availability=_option_text(option.get("availability")),
+                        contact_path=_option_text(option.get("contact_path")),
+                        fit_rationale=_option_rationale(option, name, recommended, category),
+                        rank=rank,
+                    )
+                )
+        if not candidates:
+            return None
+        return VendorShortlist(
+            candidates=candidates,
+            next_steps=["Review the shortlisted candidates and request quotes from the top picks."],
+        )
+
     def _recalled_shortlist(self, event_id: str) -> VendorShortlist | None:
         if self._memory is None:
             return None
         snapshot = self._memory.event(event_id).get(SHORTLIST)
-        return VendorShortlist.model_validate(snapshot) if snapshot is not None else None
+        if snapshot is None:
+            return None
+        recalled = VendorShortlist.model_validate(snapshot)
+        return recalled if recalled.candidates else None  # an empty snapshot buys a re-run nothing
 
     def _remember_research(self, tasks: list[Task], runs: list[TaskRun], event_id: str) -> None:
         """File each category's successful research as an event-scoped document for later recall."""
@@ -330,7 +449,8 @@ class VendorSourcingWorkflow:
             return
         for task, run in zip(tasks, runs):
             content = run.result.answer or (json.dumps(run.result.data) if run.result.data else None)
-            if run.result.succeeded and content:
+            # Partial runs with findings are worth recalling too; only data-less failures are not.
+            if content and (run.result.succeeded or run.result.data is not None):
                 self._memory.semantic.add_document(
                     content, scope=event_scope(event_id, task.assignee_agent), kind="research", event_id=event_id
                 )
@@ -350,6 +470,50 @@ class VendorSourcingWorkflow:
         if not lines:
             return None
         return "Vendors used on past events (favor proven ones when ranking):\n" + "\n".join(lines)
+
+
+def _research_options(data: dict) -> list | None:
+    """The research answer's findings list, whatever the category schema names it."""
+    for key in ("options", "candidates", "items", "quotes"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+    return None
+
+
+def _option_name(option: dict) -> str | None:
+    """A display name for one research option, across the per-category field names.
+
+    Venue/catering use name, entertainment act_name; decorations/merchandise/staffing
+    name the thing being bought (item/product/role) with the seller alongside.
+    """
+    name = _option_text(
+        option.get("name")
+        or option.get("act_name")
+        or option.get("item")
+        or option.get("product")
+        or option.get("role")
+    )
+    seller = _option_text(option.get("vendor") or option.get("source"))
+    if name and seller:
+        return f"{name} ({seller})"
+    return name or seller
+
+
+def _option_text(value: object) -> str | None:
+    """A research option field as clean text; empty and null values collapse to None."""
+    if value is None or value == "":
+        return None
+    return value if isinstance(value, str) else str(value)
+
+
+def _option_rationale(option: dict, name: str, recommended: object, category: str) -> str | None:
+    pros = option.get("pros")
+    if isinstance(pros, list) and pros:
+        return "; ".join(str(pro) for pro in pros)
+    if recommended == name:
+        return f"Recommended by the {category} research"
+    return None
 
 
 def _render_research_brief(brief: ResearchBrief, budget_usd: float | None) -> str:

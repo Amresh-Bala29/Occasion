@@ -19,13 +19,17 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from agents.requirements_agent import EventRequirements  # noqa: E402
+from agents.requirements_agent import EventRequirements, merge_requirements  # noqa: E402
 from core.config import settings  # noqa: E402
+from core.orchestrator import TaskRun  # noqa: E402
 from core.state import Memory  # noqa: E402
 from integrations.h_company.client import HClient  # noqa: E402
+from integrations.h_company.schemas import SessionResult  # noqa: E402
 from memory.event_memory import PLAN_SNAPSHOT, REQUIREMENTS, SHORTLIST  # noqa: E402
 from memory.user_preferences import DEFAULT_USER_ID, PreferencesMemory, UserPreferences  # noqa: E402
 from memory.vector_store import (  # noqa: E402
+    CHAT_NOTE,
+    DECISION,
     MemoryDocument,
     MemoryHit,
     SemanticMemory,
@@ -42,6 +46,7 @@ from test_workflows import (  # noqa: E402
     FakeSDK,
     briefs_content,
     browser_failure,
+    browser_partial,
     browser_success,
     completion_script,
     drafts_content,
@@ -119,6 +124,10 @@ class FakeMemoryRepository:
                 hits.append(MemoryHit(document=doc, rank=1.0))
         return hits[:limit]
 
+    def list_documents(self, *, scope: str, kind: str, limit: int = 10) -> list[MemoryDocument]:
+        matches = [doc for doc in self.documents if doc.scope == scope and doc.kind == kind]
+        return matches[:limit]
+
 
 # ---- Pure domain ----
 
@@ -150,6 +159,40 @@ def test_user_preferences_merge_unions_dedupes_and_is_order_independent() -> Non
     assert forward.dietary_restrictions == ["Vegan", "nut-free", "gluten-free"]
     assert set(forward.dietary_restrictions) == set(backward.dietary_restrictions)
     assert set(forward.priorities) == {"budget", "sustainability"}
+
+
+def test_merge_requirements_backfills_only_what_the_new_turn_dropped() -> None:
+    prior = EventRequirements(event_type="party", date="july 20th", location="san francisco", headcount=100)
+    new = EventRequirements(event_type="party", headcount=40, budget_usd=2000, open_questions=["Theme?"])
+
+    merged = merge_requirements(prior, new)
+
+    assert merged.date == "july 20th"  # dropped by the new extraction, restored from prior
+    assert merged.location == "san francisco"
+    assert merged.headcount == 40  # a new answer always wins over the old one
+    assert merged.budget_usd == 2000
+    assert merged.open_questions == ["Theme?"]  # per-turn: never backfilled
+
+
+def test_merge_requirements_keeps_stated_zeroes_and_empty_open_questions() -> None:
+    prior = EventRequirements(headcount=100, budget_usd=500.0, open_questions=["Date?"])
+    new = EventRequirements(headcount=0, budget_usd=0.0)
+
+    merged = merge_requirements(prior, new)
+
+    assert merged.open_questions == []  # a turn that answered everything stays answered
+    assert merged.headcount == 0  # a stated zero is a value, not an empty field
+    assert merged.budget_usd == 0.0
+
+
+def test_merge_requirements_backfills_empty_lists() -> None:
+    prior = EventRequirements(dietary_restrictions=["vegan"], priorities=["budget"])
+    new = EventRequirements(dietary_restrictions=[], priorities=["speed"])
+
+    merged = merge_requirements(prior, new)
+
+    assert merged.dietary_restrictions == ["vegan"]
+    assert merged.priorities == ["speed"]
 
 
 def test_reputation_score_is_neutral_by_default_and_rises_with_evidence() -> None:
@@ -228,6 +271,123 @@ def test_semantic_add_and_search_by_scope() -> None:
     hits = semantic.search("grand", scope=event_scope("evt-9"))
     assert [hit.document.content for hit in hits] == ["The Grand Hall seats 150"]
     assert semantic.search("note", scope=event_scope("evt-9")) == []
+
+
+def test_prompt_context_assembles_everything_the_event_knows() -> None:
+    memory = Memory(FakeMemoryRepository())
+    memory.event("evt-9").set(
+        REQUIREMENTS,
+        {
+            "event_type": "conference",
+            "headcount": 150,
+            "budget_usd": 20000.0,
+            "dietary_restrictions": ["vegan"],
+            "location": None,  # unstated fields stay out of the block
+            "open_questions": ["Theme?"],  # interview state is not a fact about the event
+        },
+    )
+    memory.event("evt-9").set(PLAN_SNAPSHOT, {"event_summary": "A 150-person conference in Austin."})
+    memory.semantic.add_document(
+        "Booked Verde Catering (catering) for $3000", scope=event_scope("evt-9"), kind=DECISION, event_id="evt-9"
+    )
+    memory.semantic.add_document(
+        "Verde does vegan catering and quoted $20 per plate",
+        scope=event_scope("evt-9", "catering"),
+        kind="research",
+        event_id="evt-9",
+    )
+    memory.preferences.accumulate(EventRequirements(priorities=["sustainability"]))
+
+    context = memory.prompt_context("evt-9", "vegan catering")
+
+    assert context is not None
+    assert "- event type: conference" in context
+    assert "- headcount: 150" in context
+    assert "- dietary restrictions: vegan" in context
+    assert "location" not in context
+    assert "Theme?" not in context
+    assert "Plan summary: A 150-person conference in Austin." in context
+    assert "Decisions already made:\n- Booked Verde Catering (catering) for $3000" in context
+    assert "Stated priorities: sustainability" in context
+    assert "Verde does vegan catering and quoted $20 per plate" in context
+
+
+def test_prompt_context_is_none_for_an_unknown_event_and_dedupes_decisions() -> None:
+    memory = Memory(FakeMemoryRepository())
+    assert memory.prompt_context("evt-0", "anything") is None
+
+    # A decision that also matches the search must appear once, and a verbose
+    # recalled note is trimmed so it can't crowd out the task.
+    memory.semantic.add_document(
+        "Booked The Venue Hall (venue)", scope=event_scope("evt-9"), kind=DECISION, event_id="evt-9"
+    )
+    verbose = "venue details " * 100  # 1400 chars, matches the query below
+    memory.semantic.add_document(verbose, scope=event_scope("evt-9", "venue"), kind="research", event_id="evt-9")
+
+    context = memory.prompt_context("evt-9", "venue")
+
+    assert context.count("Booked The Venue Hall (venue)") == 1
+    assert verbose not in context
+    assert f"{verbose[:800]}…" in context
+
+
+# ---- Run bookkeeping choreography (RunManager writes over the in-memory repository) ----
+
+
+def test_chat_answers_are_filed_as_recallable_notes(monkeypatch) -> None:
+    import core.runs as runs_module
+
+    repo = FakeMemoryRepository()
+    monkeypatch.setattr(runs_module, "MemoryRepository", lambda db: repo)
+    manager = runs_module.RunManager(session_factory=lambda: None)
+    answered = TaskRun(
+        agent="venue",
+        result=SessionResult(succeeded=True, status="idle", outcome="success", answer="The Grand Hall fits"),
+    )
+
+    manager._remember_chat_note(None, answered, "Find a waterfront venue", "evt-9")
+
+    (doc,) = repo.documents
+    assert (doc.scope, doc.kind, doc.event_id) == ("event:evt-9:venue", CHAT_NOTE, "evt-9")
+    assert "Asked: Find a waterfront venue" in doc.content
+    assert "Answer: The Grand Hall fits" in doc.content
+
+    # Requirements turns, workflow runs, failures, and event-less runs all stay out:
+    # their knowledge is persisted through other channels (snapshots, research docs).
+    ok = SessionResult(succeeded=True, status="idle", outcome="success", answer="done")
+    manager._remember_chat_note(None, TaskRun(agent="requirements", result=ok), "m", "evt-9")
+    manager._remember_chat_note(None, TaskRun(agent="workflow/vendor_sourcing", result=ok), "m", "evt-9")
+    manager._remember_chat_note(None, TaskRun(agent="venue", result=SessionResult(succeeded=False, status="failed", error="x")), "m", "evt-9")
+    manager._remember_chat_note(None, TaskRun(agent="venue", result=ok), "m", None)
+    assert len(repo.documents) == 1
+
+
+def test_booking_outcomes_are_filed_as_decisions(monkeypatch) -> None:
+    import core.runs as runs_module
+
+    repo = FakeMemoryRepository()
+    monkeypatch.setattr(runs_module, "MemoryRepository", lambda db: repo)
+    manager = runs_module.RunManager(session_factory=lambda: None)
+    action = {
+        "event_id": "evt-9",
+        "candidate": {"name": "The Grand Hall", "category": "venue"},
+        "amount_usd": 7500.0,
+    }
+    booked = TaskRun(
+        agent="venue",
+        result=SessionResult(succeeded=True, status="idle", outcome="success", answer="confirmed for Aug 6"),
+    )
+
+    manager._remember_booking_decision(None, booked, action)
+
+    (doc,) = repo.documents
+    assert (doc.scope, doc.kind) == ("event:evt-9", DECISION)
+    assert doc.content == "Booked The Grand Hall (venue) for $7500 — confirmed for Aug 6"
+
+    # A failed booking is not a decision.
+    failed = TaskRun(agent="venue", result=SessionResult(succeeded=False, status="failed", error="checkout crashed"))
+    manager._remember_booking_decision(None, failed, action)
+    assert len(repo.documents) == 1
 
 
 # ---- Workflow choreography (real memory over the in-memory repository) ----
@@ -313,6 +473,50 @@ def test_sourcing_records_research_then_resumes_from_shortlist(monkeypatch) -> N
     assert report2.shortlist.candidates[0].name == "The Grand Hall"
     assert sdk2.calls == []
     assert requests2 == []
+
+
+def test_partial_research_is_filed_for_recall(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    memory = Memory(FakeMemoryRepository())
+    repo = memory._repo
+    sdk = FakeSDK(
+        routes=[
+            ("peerspace", browser_partial(FakeResearch(options=[{"name": "The Grand Hall"}]))),
+            ("corporate+catering", browser_success(FakeResearch(options=[{"name": "Verde Catering"}]))),
+        ]
+    )
+    http, _ = completion_script(briefs_content(), shortlist_content())
+    flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http, memory=memory)
+
+    asyncio.run(flow.run(make_plan(), event_id="evt-9"))
+
+    # The partial venue run carried findings, so it is recallable like a success.
+    assert any(doc.kind == "research" and "venue" in doc.scope for doc in repo.documents)
+
+
+def test_empty_shortlist_is_not_snapshotted_and_an_empty_snapshot_reruns(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "hai_api_key", "hk-test")
+    memory = Memory(FakeMemoryRepository())
+    repo = memory._repo
+    sdk = FakeSDK(default=browser_success(FakeResearch()))
+    http, _ = completion_script(briefs_content(), {"candidates": []}, {"candidates": []})
+    flow = VendorSourcingWorkflow(client=HClient(sdk), http_client=http, memory=memory)
+
+    report = asyncio.run(flow.run(make_plan(), event_id="evt-9"))
+
+    assert report.succeeded is False
+    assert repo.get_event_memory("evt-9", SHORTLIST) is None  # a failed round leaves no snapshot
+
+    # An empty snapshot left by an older run must not short-circuit the research fan-out.
+    memory.event("evt-9").set(SHORTLIST, {"candidates": [], "gaps": [], "recommendations": [], "next_steps": []})
+    sdk2 = FakeSDK(default=browser_success(FakeResearch()))
+    http2, _ = completion_script(briefs_content(), shortlist_content())
+    flow2 = VendorSourcingWorkflow(client=HClient(sdk2), http_client=http2, memory=memory)
+
+    report2 = asyncio.run(flow2.run(make_plan(), event_id="evt-9"))
+
+    assert sdk2.calls  # research re-ran instead of resuming from emptiness
+    assert report2.succeeded is True
 
 
 def test_outreach_records_contacts_and_quotes_but_not_failed_sends(monkeypatch) -> None:

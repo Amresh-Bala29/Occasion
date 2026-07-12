@@ -71,7 +71,7 @@ _PHASE_KEYWORDS: dict[str, frozenset[str]] = {
     "Sourcing": frozenset({"research", "compare", "source", "sourcing", "find", "shortlist", "quote", "quotes", "explore"}),
     "Booking": frozenset({"book", "sign", "contract", "confirm", "deposit", "pay", "approve", "reserve", "hire", "negotiate"}),
     "Production": frozenset({"order", "upload", "produce", "print", "build", "install", "setup", "prepare", "rehearse", "rehearsal", "assemble", "design"}),
-    "Day-of": frozenset({"loadin", "checkin", "arrivals", "onsite", "runofshow"}),
+    "Day-of": frozenset({"loadin", "checkin", "arrivals", "onsite", "runofshow", "dayof"}),
     "Wrap-up": frozenset({"thank", "refund", "reconcile", "survey", "teardown", "payout", "wrap", "returns", "recap"}),
 }
 _DEFAULT_PHASE = "Production"
@@ -179,7 +179,11 @@ def _group_ordinal(name: str) -> int:
 
 
 def _phase_for(title: str) -> str:
-    words = set(_WORD.findall(title.lower()))
+    lowered = title.lower()
+    words = set(_WORD.findall(lowered))
+    # Hyphenated compounds ("load-in", "day-of") also count as one word, so the
+    # collapsed Day-of keywords can match them; plain tokens still cover the rest.
+    words.update(_WORD.findall(lowered.replace("-", "")))
     for phase, keywords in _PHASE_KEYWORDS.items():
         if words & keywords:
             return phase

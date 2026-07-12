@@ -2,12 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
 
 import { useEvent } from "@/hooks/useEvent";
 
 interface SidebarProps {
-  activeEvent: string;
   messagesCount: number;
 }
 
@@ -23,19 +21,19 @@ const BADGE_TONE_CLASSES = {
   amber: "bg-warn-soft text-warn-deep",
 } as const;
 
-export function Sidebar({ activeEvent, messagesCount }: SidebarProps) {
+export function Sidebar({ messagesCount }: SidebarProps) {
   const pathname = usePathname();
-  const { approvals, autoApproveLimit } = useEvent();
+  const { autoApproveLimit } = useEvent();
 
   const navEntries: NavEntry[] = [
+    { label: "Ask Occasion", href: "/dashboard/ask" },
     { label: "Overview", href: "/dashboard" },
     { label: "Plan", href: "/dashboard/plan" },
     { label: "Vendors", href: "/dashboard/vendors" },
     { label: "Budget", href: "/dashboard/budget" },
     { label: "Calendar", href: "/dashboard/calendar" },
     { label: "Messages", href: "/dashboard/messages", badge: messagesCount, badgeTone: "gray" },
-    { label: "Approvals", href: "/dashboard/approvals", badge: approvals.length, badgeTone: "amber" },
-    { label: "Post-event", href: "/dashboard/post-event" },
+    { label: "Settings", href: "/dashboard/approvals" },
   ];
 
   return (
@@ -47,7 +45,7 @@ export function Sidebar({ activeEvent, messagesCount }: SidebarProps) {
         <span className="text-[16.5px] font-bold tracking-[-0.01em]">Occasion</span>
       </div>
 
-      <EventSwitcher activeEvent={activeEvent} />
+      <ProjectShortcuts />
 
       <nav
         className="flex flex-row gap-1 overflow-x-auto pb-0.5 md:flex-1 md:flex-col md:gap-0.5 md:overflow-visible md:pb-0"
@@ -93,79 +91,66 @@ export function Sidebar({ activeEvent, messagesCount }: SidebarProps) {
   );
 }
 
-/** Active-event selector; a single-event workspace for now, so the menu just confirms it. */
-function EventSwitcher({ activeEvent }: { activeEvent: string }) {
-  const [open, setOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function closeOnOutsideClick(event: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setOpen(false);
-    }
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutsideClick);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [open]);
-
+/** Workspace shortcuts that replaced the per-event switcher; projects are browsed
+ *  on /projects and picking one there sets the active-event cookie. */
+function ProjectShortcuts() {
   return (
-    <div className="relative" ref={menuRef}>
-      <button
-        type="button"
-        className="block w-full cursor-pointer rounded-[10px] border border-line-strong bg-surface px-3 py-2.5 text-left hover:border-[#c3cbdd]"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((prev) => !prev)}
-      >
-        <span className="block font-mono text-[9.5px] font-semibold tracking-[0.14em] text-ink-soft uppercase">
-          Active event
-        </span>
-        <span className="mt-1 flex items-center justify-between gap-2 text-[14px] font-semibold">
-          {activeEvent}
-          <svg
-            className={`shrink-0 text-ink-faint transition-transform ${open ? "rotate-180" : ""}`}
-            width="10"
-            height="6"
-            viewBox="0 0 10 6"
-            fill="none"
-            aria-hidden="true"
-          >
-            <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-        </span>
-      </button>
-
-      {open && (
-        <div
-          role="menu"
-          className="absolute inset-x-0 top-full z-30 mt-1.5 overflow-hidden rounded-[10px] border border-line bg-surface shadow-modal"
-        >
-          <button
-            type="button"
-            role="menuitemradio"
-            aria-checked="true"
-            className="flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-2.5 text-left text-[13.5px] font-semibold hover:bg-brand-soft"
-            onClick={() => setOpen(false)}
-          >
-            {activeEvent}
-            <span className="text-brand" aria-hidden="true">
-              ✓
-            </span>
-          </button>
-          <div className="border-t border-line px-3 py-2.5 text-[12px] text-ink-faint">
-            New events arrive here once Occasion plans them.
-          </div>
-        </div>
-      )}
-    </div>
+    <nav
+      aria-label="Projects"
+      className="divide-y divide-line overflow-hidden rounded-[10px] border border-line-strong"
+    >
+      <ShortcutRow href="/projects" label="All Projects" icon={GRID_ICON} />
+      <ShortcutRow href="/ask?new=1" label="New Project" icon={PLUS_ICON} accent />
+      <ShortcutRow href="/dashboard/approvals" label="Project Settings" icon={SLIDERS_ICON} />
+    </nav>
   );
 }
+
+function ShortcutRow({
+  href,
+  label,
+  icon,
+  accent = false,
+}: {
+  href: string;
+  label: string;
+  icon: React.ReactNode;
+  accent?: boolean;
+}) {
+  const tone = accent ? "text-brand hover:bg-brand-soft" : "text-ink hover:bg-[#f4f6fb]";
+
+  return (
+    <Link href={href} className={`flex items-center gap-2.5 px-3 py-[9px] text-[13px] font-semibold ${tone}`}>
+      <span className={accent ? "text-brand" : "text-ink-faint"} aria-hidden="true">
+        {icon}
+      </span>
+      {label}
+    </Link>
+  );
+}
+
+const GRID_ICON = (
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+    <rect x="1.5" y="1.5" width="4.6" height="4.6" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+    <rect x="7.9" y="1.5" width="4.6" height="4.6" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+    <rect x="1.5" y="7.9" width="4.6" height="4.6" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+    <rect x="7.9" y="7.9" width="4.6" height="4.6" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+  </svg>
+);
+
+const PLUS_ICON = (
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+    <path d="M7 2.2v9.6M2.2 7h9.6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+  </svg>
+);
+
+const SLIDERS_ICON = (
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+    <path d="M1.5 4.2h11M1.5 9.8h11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    <circle cx="8.8" cy="4.2" r="1.9" fill="#fff" stroke="currentColor" strokeWidth="1.5" />
+    <circle cx="5.2" cy="9.8" r="1.9" fill="#fff" stroke="currentColor" strokeWidth="1.5" />
+  </svg>
+);
 
 function NavItem({ entry, active }: { entry: NavEntry; active: boolean }) {
   const baseClasses =

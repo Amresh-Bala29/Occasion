@@ -31,6 +31,8 @@ class ProposedAction:
     vendor: str
     amount_usd: float = 0.0
     thread_id: str | None = None
+    # Machine-readable spec of the action itself, so approving the row can execute it.
+    action: dict | None = None
 
 
 @dataclass
@@ -63,6 +65,7 @@ class ApprovalManager:
             amount=spending_rules.format_usd(action.amount_usd),
             vendor=action.vendor,
             thread_id=action.thread_id,
+            action=action.action,
         )
         return ApprovalDecision(requires_approval=True, approval_id=row.id, reason=decision.reason)
 
