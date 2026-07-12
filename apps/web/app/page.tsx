@@ -603,6 +603,16 @@ function ProductSection() {
             <p className="mt-5 font-mono text-[11px] tracking-[0.06em] text-ink-soft">
               real browser sessions · watchable replays · your spending rules
             </p>
+            <div className="mt-6 flex flex-wrap items-center gap-2.5">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 py-1 font-mono text-[10.5px] font-semibold tracking-[0.06em] text-ink-soft shadow-card whitespace-nowrap">
+                <span className="dot dot-blue" />
+                Powered by H Company
+              </span>
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 py-1 font-mono text-[10.5px] font-semibold tracking-[0.06em] text-ink-soft shadow-card whitespace-nowrap">
+                <span className="dot dot-green" />
+                Powered by Gradium
+              </span>
+            </div>
           </div>
 
           <div data-reveal style={{ "--rd": "150ms" } as CSSProperties}>
