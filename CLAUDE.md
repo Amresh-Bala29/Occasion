@@ -7,6 +7,7 @@ Write code a human can read top-to-bottom and understand without a debugger.
 - **Traceable.** Control flow should be obvious. Name things for what they do, not how. Avoid hidden side effects — a function's effects should be predictable from its signature and name.
 - **Maintainable.** Optimize for the next person reading this cold in six months. Explicit over implicit, boring over surprising.
 - **H-aware.** Consult the H Company agent docs at https://hub.hcompany.ai/computer-use-agents/introduction before implementing anything H-related.
+- **Gradium-aware.** Consult the Gradium docs at https://docs.gradium.ai/ before implementing anything Gradium-related.
 
 ## Comments
 - Comment the *why*, never the *what*. The code says what; comments explain intent, tradeoffs, and non-obvious constraints.
@@ -51,7 +52,7 @@ Occasion is an autonomous AI event coordinator: it researches, communicates, pur
 8. **Buy decorations and supplies.** Purchase signage, banners, linens, lighting, name tags, furniture, stage equipment, registration supplies, gifts, prizes, and cleaning materials. (`agents/decorations_agent.py`, `agents/purchasing_agent.py`)
 9. **Produce custom-branded products.** From a user-uploaded logo, find manufacturers, request quotes, upload artwork, choose materials and quantities, weigh production and shipping times, pay for expedited runs when needed, and track delivery. (`agents/merchandise_agent.py`)
 10. **Purchase intelligently.** Reason over budget limits, shipping deadlines, vendor reliability, quality-vs-cost, bulk discounts, expedited shipping, cancellation policies, and backup suppliers — and state the tradeoff before acting. (`agents/purchasing_agent.py`, `planning/budget_optimizer.py`)
-11. **Manage the calendar.** Schedule vendor calls, venue tours, payment deadlines, delivery windows, staff shifts, setup, rehearsals, catering arrivals, event sessions, and cleanup. (`agents/scheduling_agent.py`, `integrations/calendar/`)
+11. **Manage the calendar.** Schedule vendor calls, venue tours, payment deadlines, delivery windows, staff shifts, setup, rehearsals, catering arrivals, event sessions, and cleanup. (`agents/scheduling_agent.py`)
 12. **Maintain a live budget.** Track estimated vs. confirmed cost, amount paid, remaining budget, deposits, refund policies, unexpected expenses, and suggested savings. (`agents/budget_agent.py`)
 13. **Enforce human approval gates.** Research and prepare actions autonomously, but require approval before sensitive ones — important emails, contracts, bookings, purchases, deposits, sharing private data — honoring user-defined spending limits that bypass approval. (`approvals/`)
 14. **Drive the event dashboard.** Surface overall completion percentage, budget status, confirmed vendors, pending approvals, upcoming deadlines, deliveries, staff schedules, vendor messages, risks, and recommended next actions. (`apps/web`, `components/EventDashboard.tsx`)
