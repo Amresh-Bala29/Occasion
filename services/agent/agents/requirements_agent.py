@@ -67,7 +67,7 @@ Rules:
 # complete rather than let the model keep finding one more thing to ask. Each round it
 # already asked shows up in the transcript as a marker line (ChatPanel.buildTranscript
 # writes it), so counting those markers bounds how many rounds the client ever sees.
-MAX_CLARIFYING_ROUNDS = 3
+MAX_CLARIFYING_ROUNDS = 1
 _QUESTION_ROUND_MARKER = "Occasion asked:"
 
 
