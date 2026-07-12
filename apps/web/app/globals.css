@@ -84,6 +84,10 @@
     @apply bg-[#eef1f6] text-ink-soft;
   }
 
+  .chip-blue {
+    @apply bg-brand-soft text-brand-deep;
+  }
+
   .btn {
     @apply cursor-pointer rounded-[9px] border border-transparent px-4 py-2 text-[13px] font-semibold;
   }
@@ -115,4 +119,36 @@
   .dot-gray {
     @apply bg-ink-mist;
   }
+}
+
+/* Messages outbox: sending a planned email. The paper plane lifts off the Send
+   button, then the Sent confirmation pops in as the email flips to Sent. */
+@keyframes send-liftoff {
+  0% {
+    transform: translate(0, 0) rotate(0);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(34px, -30px) rotate(18deg);
+    opacity: 0;
+  }
+}
+
+@keyframes sent-pop {
+  0% {
+    transform: translateY(5px) scale(0.96);
+    opacity: 0;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.animate-send-liftoff {
+  animation: send-liftoff 0.8s cubic-bezier(0.5, 0, 0.75, 0) forwards;
+}
+
+.animate-sent-pop {
+  animation: sent-pop 0.3s ease-out both;
 }
