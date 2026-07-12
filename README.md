@@ -76,11 +76,56 @@ skills, carrying the same signed-in cloud browser. A shared instruction appended
 every agent encodes the product's contract — clear routine web obstacles (cookie
 walls, popups) autonomously, but stop at true blockers (logins without credentials,
 security checks) and at any sensitive commitment, which needs explicit authorization
-in the task text itself.
+in the task text itself. Every agent returns a **typed Pydantic schema**, so its
+web work comes back as structured, comparable data rather than prose.
 
-**Workflows (`workflows/`).** Multi-agent flows for jobs that cross agent
-boundaries: `event_planning` (timeline, budget, task DAG, risk), `vendor_sourcing`,
-and `vendor_outreach` (email threads, quote comparison, follow-ups).
+| Agent | Model | What it does |
+|-------|-------|--------------|
+| **Requirements** | deep | Interviews the client and structures the brief — type, date, headcount, budget, food, staffing, entertainment, branding, accessibility, shipping deadlines, and stated priorities. Emits open follow-up questions; an empty list means the interview is complete. → `EventRequirements` |
+| **Venue** | deep | Searches venue marketplaces and venue sites, verifies capacity / price / availability / equipment / house rules on the primary page (never inferred), then contacts managers for quotes and tours. → `VenueResearch` (compared shortlist + recommendation) |
+| **Catering** | deep | Finds caterers, reads menus and per-person pricing at the source, treats dietary restrictions as hard requirements, and computes food/drink quantities from headcount and duration *showing the arithmetic*. → `CateringPlan` |
+| **Staffing** | deep | Sources temporary staff — registration, security, bartenders, servers, AV, photographers, medical — across platforms and agencies, matching each to a role, shift window, and arrival time. Reports uncovered roles as coverage gaps rather than stretching weak options. → `StaffingPlan` |
+| **Entertainment** | deep | Evaluates DJs, bands, speakers, hosts, comedians, photobooths, and activities on price, date availability, and reviews, and captures each act's technical requirements (stage, power, AV, space) to decide whether it fits the venue. → `EntertainmentResearch` |
+| **Decorations** | deep | Sources signage, linens, lighting, name tags, furniture, stage gear, gifts, and cleaning supplies; sizes quantities from the headcount and disqualifies items that arrive after the shipping deadline. Assembles carts as evidence but never enters a payment flow. → `SupplyShortlist` |
+| **Merchandise** | deep | From the event's logo, finds manufacturers for custom swag, collects quotes with quantity breaks and setup fees, captures artwork requirements, and weighs production + shipping time against the event deadline. → `MerchandiseResearch` |
+| **Purchasing** | deep | The **only** agent that completes checkouts. Proceeds only when the task text explicitly grants approval for that exact item and amount; otherwise researches up to the payment step and aborts. States the tradeoff weighed (budget cap, deadline, quality, cancellation policy) before paying. → `PurchaseReport` |
+| **Marketing** | deep | Produces ready-to-publish collateral — listing descriptions, announcement emails, social posts — per channel, audience, and tone, grounded in the event's real facts, plus visual direction for a designer or image tool. → `MarketingCollateral` |
+| **Distribution** | fast | Publishes and maintains listings on **Luma, Partiful, Eventbrite, and Meetup** using the marketing agent's copy, records each live public URL, and edits existing listings on updates. One platform being blocked never stops the others. → `DistributionReport` |
+| **Scheduling** | fast | Manages the signed-in Google Calendar — vendor calls, tours, payment deadlines, delivery windows, staff shifts, setup, rehearsals, catering arrivals, sessions, cleanup — checking each slot for collisions before booking. → `ScheduleReport` |
+| **Budget** | deep | Keeps the live budget honest: estimated vs. confirmed vs. paid, deposits, refund policies, and savings, verifying every figure at its source URL so an estimate never masquerades as a commitment. → `BudgetReview` |
+| **Post-event** | deep | Settles the wrap-up — final vendor payments, thank-yous, feedback surveys, receipt collection, refund requests, and media gathering — replying in-thread per vendor. Payments and refunds are approval-gated; the rest runs on its own. → `PostEventReport` |
+
+**Workflows (`workflows/`).** Multi-agent pipelines for jobs that cross agent
+boundaries. They chain browserless Holo reasoning with fleets of parallel
+computer-use sessions (run in **waves of three**, the H session cap), and keep
+binding actions behind their own approval-gated calls.
+
+*`event_planning`* — turns a client brief into a full plan and the tasks to execute
+it. (1) the requirements agent structures the brief; (2) a deep Holo completion
+synthesizes the plan — timeline, budget, checklist, vendor categories, deadlines,
+schedules, backups, risks; (3) pure code derives one pinned, guard-railed research
+task per vendor category, so every planned category is dispatchable by construction;
+(4) the scheduling agent optionally drops key deadlines on the calendar. This module
+is the pipeline's import root — sourcing and outreach build on its plan models.
+
+*`vendor_sourcing`* — turns the plan into a ranked, compared shortlist. (1) H's deep-
+search agent optionally sweeps the web for candidate URLs; (2) a deep Holo completion
+compiles each category's needs into a browser brief shaped the way H's docs say runs
+succeed — explicit start URL, ordered steps, success criteria; (3) the category
+agents research in parallel waves, each session bounded at 40 minutes; (4) a deep
+completion merges every category's findings into one shortlist with per-category
+rankings, gaps, and cross-category tradeoffs. Booking is a separate, approval-gated
+`book` call, never part of research.
+
+*`vendor_outreach`* — contacts shortlisted vendors and tracks what returns. (1) code
+picks the best-ranked candidates per category; (2) a deep completion drafts a
+personalized inquiry per vendor; (3) H's general web agent sends each — inquiry form
+where one exists, signed-in Gmail otherwise — in parallel waves; (4) a deep completion
+turns the send reports into a quote comparison with escalations for the decisions only
+the user can make. `follow_up` chases silent vendors (checking the thread first so a
+reply is never double-nudged) and `negotiate` sends one propose-only counter; sends go
+through the general web agent so an unrepeatable action never reads as a retryable
+failure.
 
 **Planning (`planning/`).** The reasoning layer behind the plan — `task_graph` (the
 DAG), `constraints`, `budget_optimizer`, `schedule_optimizer`, `risk_analyzer`.
