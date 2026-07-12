@@ -39,9 +39,12 @@ export function Sidebar({ messagesCount }: SidebarProps) {
   return (
     <aside className="flex flex-col gap-4 border-b border-line bg-surface px-3.5 py-[18px] md:sticky md:top-0 md:h-screen md:overflow-y-auto md:border-r md:border-b-0">
       <div className="flex items-center gap-2.5 px-1.5 pt-0.5">
-        <span className="relative size-[30px] shrink-0 rounded-[9px] bg-brand" aria-hidden="true">
-          <span className="absolute inset-[9px] rounded-full border-[2.5px] border-white" />
-        </span>
+        <img
+          src="/occasion_logo.png"
+          alt=""
+          aria-hidden
+          className="size-[30px] shrink-0 rounded-[9px] object-cover"
+        />
         <span className="text-[16.5px] font-bold tracking-[-0.01em]">Occasion</span>
       </div>
 

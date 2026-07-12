@@ -466,9 +466,12 @@ function requirementsSummary(data: RequirementsData): string {
 function EmptyState({ onPick }: { onPick: (suggestion: string) => void }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 py-10 text-center">
-      <span className="relative size-10 rounded-xl bg-brand" aria-hidden="true">
-        <span className="absolute inset-3 rounded-full border-[3px] border-white" />
-      </span>
+      <img
+        src="/occasion_logo.png"
+        alt=""
+        aria-hidden
+        className="size-10 rounded-xl object-cover"
+      />
       <h2 className="mt-1 font-serif text-[26px] font-medium">Plan with Occasion</h2>
       <p className="max-w-[46ch] text-[13.5px] leading-relaxed text-ink-soft">
         Describe what you need for the event and Occasion will go do the work on real websites —
@@ -811,9 +814,12 @@ function formatElapsed(ms: number): string {
 
 function AssistantAvatar() {
   return (
-    <span className="relative mt-1 size-6 shrink-0 rounded-[7px] bg-brand" aria-hidden="true">
-      <span className="absolute inset-[7px] rounded-full border-2 border-white" />
-    </span>
+    <img
+      src="/occasion_logo.png"
+      alt=""
+      aria-hidden
+      className="mt-1 size-6 shrink-0 rounded-[7px] object-cover"
+    />
   );
 }
 
