@@ -134,9 +134,12 @@ export default function AskPage() {
       {/* Header sits outside the fade so the escape hatch survives the exit. */}
       <header className="relative z-10 flex items-center justify-between px-6 py-5 md:px-10">
         <Link href="/" className="flex items-center gap-2.5">
-          <span className="relative size-[30px] shrink-0 rounded-[9px] bg-brand" aria-hidden="true">
-            <span className="absolute inset-[9px] rounded-full border-[2.5px] border-white" />
-          </span>
+          <img
+            src="/occasion_logo.png"
+            alt=""
+            aria-hidden
+            className="size-[30px] shrink-0 rounded-[9px] object-cover"
+          />
           <span className="text-[16.5px] font-bold tracking-[-0.01em]">Occasion</span>
         </Link>
         <Link
